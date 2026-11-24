@@ -1,16 +1,14 @@
 package love.crysh.exp.fabric.testmod.mixin;
 
-import org.spongepowered.asm.mixin.Mixin;
-import org.spongepowered.asm.mixin.injection.Constant;
-import org.spongepowered.asm.mixin.injection.ModifyConstant;
-
 import love.crysh.exp.Main;
+import org.spongepowered.asm.mixin.Mixin;
+import org.spongepowered.asm.mixin.injection.At;
+import org.spongepowered.asm.mixin.injection.Inject;
+import org.spongepowered.asm.mixin.injection.callback.CallbackInfo;
 
 @Mixin(value = Main.class, remap = false)
 public abstract class MainMixin {
-
-    @ModifyConstant(method = "main([Ljava/lang/String;)V", constant = @Constant(stringValue = "8080"), require = 1)
-    private static String modifyDefaultPort(String original) {
-        return "1119";
+    @Inject(method = "main([Ljava/lang/String;)V", at = @At("HEAD"), require = 1)
+    private static void test$main(CallbackInfo callbackInfo) {
     }
 }
