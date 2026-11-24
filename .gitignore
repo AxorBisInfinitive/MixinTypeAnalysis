@@ -1,0 +1,84 @@
+# ==============================
+# Maven
+# ==============================
+target/
+pom.xml.tag
+pom.xml.releaseBackup
+pom.xml.versionsBackup
+release.properties
+.flattened-pom.xml
+
+# ==============================
+# Java
+# ==============================
+*.class
+*.jar
+*.war
+*.ear
+hs_err_pid*
+replay_pid*
+
+# ==============================
+# IntelliJ IDEA
+# ==============================
+.idea/
+*.iml
+out/
+
+# ==============================
+# Eclipse
+# ==============================
+.classpath
+.project
+.settings/
+.metadata/
+
+# ==============================
+# VS Code
+# ==============================
+.vscode/
+
+# ==============================
+# Gradle (if accidentally introduced)
+# ==============================
+.gradle/
+build/
+
+# ==============================
+# Logs
+# ==============================
+*.log
+logs/
+
+# ==============================
+# Operating Systems
+# ==============================
+.DS_Store
+.AppleDouble
+.LSOverride
+Thumbs.db
+Desktop.ini
+
+# ==============================
+# Temporary files
+# ==============================
+*.tmp
+*.temp
+*.swp
+*.swo
+*~
+
+# ==============================
+# Crash dumps
+# ==============================
+*.hprof
+
+# ==============================
+# Custom
+# ==============================
+/data/
+/repos/
+/assets/
+/docs/
+
+/AGENTS.md
