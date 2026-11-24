@@ -3,7 +3,9 @@
     "package": "love.crysh.exp.fabric.testmod.mixin",
     "compatibilityLevel": "JAVA_25",
     "mixins": [
-        "MainMixin"
+        "MainMixin",
+        "StoreMixin",
+        "BusinessServiceMixin"
     ],
     "injectors": {
         "defaultRequire": 1

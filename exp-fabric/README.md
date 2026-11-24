@@ -12,7 +12,7 @@ mvn -f exp-fabric/pom.xml clean package
 mvn -f exp-fabric-testmod/pom.xml clean package
 ```
 
-`exp-fabric-testmod` 以 `provided` 依赖 `love.crysh:exp:0.1.0-Snapshot`，因此第一次构建需要先将 `exp` 安装到本机 Maven 仓库。该依赖只用于编译期类型检查，不会打入验证模组 JAR。运行时业务类由 `exp-fabric` 加入 Knot classpath。
+`exp-fabric-testmod` 以 `provided` 依赖 `love.crysh:exp:0.1.0-Snapshot`，因此第一次构建需要先将 `exp` 安装到本机 Maven 仓库。安装时会一并发布 `exp-0.1.0-Snapshot-sources.jar`，IDE 可用它打开业务源码。该依赖只用于编译期类型检查，不会打入验证模组 JAR。运行时业务类由 `exp-fabric` 加入 Knot classpath。
 
 ## 运行
 
