@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="light">
+    <title>Exp · 订单与库存</title>
+    <link rel="stylesheet" href="/styles.css">
+    <script src="/app.js" defer></script>
+</head>
+<body>
+    <aside class="sidebar">
+        <a class="brand" href="#orders" aria-label="Exp 首页">exp<span>.</span></a>
+        <p class="workspace-name">订单与库存</p>
+        <nav aria-label="业务导航">
+            <a href="#orders" data-page="orders"><span class="nav-symbol">▤</span>订单管理</a>
+            <a href="#products" data-page="products"><span class="nav-symbol">▦</span>商品管理</a>
+            <a href="#inventory" data-page="inventory"><span class="nav-symbol">▣</span>库存管理</a>
+            <a href="#movements" data-page="movements"><span class="nav-symbol">≋</span>库存流水</a>
+        </nav>
+        <div class="workspace-status"><span class="status-dot"></span><span id="connection-status">正在连接</span></div>
+    </aside>
+    <main>
+        <header class="page-header">
+            <div><p class="page-date" id="today"></p><h1 id="page-title">订单管理</h1></div>
+            <button class="button primary" id="create-button">＋ 新建订单</button>
+        </header>
+        <section class="metrics" id="metrics" aria-label="业务概况"></section>
+        <section class="panel">
+            <div class="panel-toolbar">
+                <h2 id="panel-title">全部订单</h2>
+                <form id="search-form" class="search-form" role="search">
+                    <label class="sr-only" for="search">查询内容</label>
+                    <input id="search" type="search" maxlength="200" placeholder="查询订单编号或客户">
+                    <label class="sr-only" for="status-filter">订单状态</label>
+                    <select id="status-filter">
+                        <option value="">全部状态</option>
+                        <option value="DRAFT">草稿</option>
+                        <option value="CONFIRMED">已确认</option>
+                        <option value="COMPLETED">已完成</option>
+                        <option value="CANCELLED">已取消</option>
+                    </select>
+                    <label class="sr-only" for="product-filter">商品</label>
+                    <select id="product-filter" hidden><option value="">全部商品</option></select>
+                    <button type="submit" class="button subtle">查询</button>
+                </form>
+            </div>
+            <div id="content" class="table-container" aria-live="polite"></div>
+            <footer class="panel-footer"><span id="record-count"></span><button id="refresh-button" class="text-button">刷新数据 ↻</button></footer>
+        </section>
+    </main>
+
+    <dialog id="product-dialog">
+        <form id="product-form">
+            <div class="dialog-heading"><h2 id="product-dialog-title">新增商品</h2><button type="button" class="close-button" data-close aria-label="关闭">×</button></div>
+            <input type="hidden" name="id">
+            <div class="form-fields">
+                <label>商品编号<input name="sku" required maxlength="64" placeholder="例如 P-001"></label>
+                <label>商品名称<input name="name" required maxlength="120" placeholder="填写商品名称"></label>
+                <label>售价<span class="input-with-unit"><span>¥</span><input name="price" required type="number" min="0" max="99999999.99" step="0.01" placeholder="0.00"></span></label>
+                <label class="checkbox-label"><input name="active" type="checkbox" checked>启用商品</label>
+            </div>
+            <p class="form-error" role="alert"></p>
+            <div class="dialog-actions"><button type="button" class="button subtle" data-close>取消</button><button type="submit" class="button primary">保存商品</button></div>
+        </form>
+    </dialog>
+
+    <dialog id="stock-dialog">
+        <form id="stock-form">
+            <div class="dialog-heading"><h2>商品入库</h2><button type="button" class="close-button" data-close aria-label="关闭">×</button></div>
+            <input type="hidden" name="id">
+            <div class="form-fields">
+                <p id="stock-product" class="selected-product"></p>
+                <label>入库数量<input name="quantity" required type="number" min="1" max="1000000" step="1" placeholder="填写本次入库数量"></label>
+                <label>备注<textarea name="note" maxlength="200" rows="3" placeholder="可填写采购来源或入库原因"></textarea></label>
+            </div>
+            <p class="form-error" role="alert"></p>
+            <div class="dialog-actions"><button type="button" class="button subtle" data-close>取消</button><button type="submit" class="button primary">确认入库</button></div>
+        </form>
+    </dialog>
+
+    <dialog id="order-dialog" class="wide-dialog">
+        <form id="order-form">
+            <div class="dialog-heading"><h2 id="order-dialog-title">新建订单</h2><button type="button" class="close-button" data-close aria-label="关闭">×</button></div>
+            <input type="hidden" name="id">
+            <div class="form-fields">
+                <label>客户名称<input name="customer" required maxlength="120" placeholder="填写客户姓名或公司名称"></label>
+                <div class="section-heading"><h3>订单商品</h3><button type="button" id="add-line" class="text-button">＋ 添加商品</button></div>
+                <div id="order-lines" class="order-lines"></div>
+                <div class="order-total"><span>订单合计</span><strong id="draft-total">¥ 0.00</strong></div>
+            </div>
+            <p class="form-error" role="alert"></p>
+            <div class="dialog-actions"><button type="button" class="button subtle" data-close>取消</button><button type="submit" class="button primary">保存草稿</button></div>
+        </form>
+    </dialog>
+
+    <dialog id="detail-dialog" class="wide-dialog">
+        <div class="dialog-heading"><h2 id="detail-title">订单详情</h2><button type="button" class="close-button" data-close aria-label="关闭">×</button></div>
+        <div id="order-detail"></div>
+        <p class="form-error" role="alert"></p>
+        <div class="dialog-actions" id="detail-actions"></div>
+    </dialog>
+
+    <dialog id="confirm-dialog">
+        <form method="dialog">
+            <div class="dialog-heading"><h2 id="confirm-title">确认操作</h2></div>
+            <p id="confirm-description" class="confirm-description"></p>
+            <div class="dialog-actions"><button value="cancel" class="button subtle">返回</button><button value="confirm" class="button primary">确认</button></div>
+        </form>
+    </dialog>
+    <div class="toast" id="toast" role="status" hidden></div>
+</body>
+</html>
