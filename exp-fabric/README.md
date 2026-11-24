@@ -22,4 +22,4 @@ mvn -f exp-fabric-testmod/pom.xml clean package
 ./exp-fabric/run.ps1
 ```
 
-脚本会将验证模组复制到 `exp-fabric/run/mods/`，并使用 `exp-fabric/target/lib/` 中的 Loader 运行依赖。`MainMixin` 会将 `Main.add` 改为乘法。模组入口会通过辅助 JVM 附加 Agent，在 `Main` 首次加载时将 `Main.div` 中的整数除法改为减法。当前示例最终输出 `32`。
+脚本会将验证模组复制到 `exp-fabric/run/mods/`，并使用 `exp-fabric/target/lib/` 中的 Loader 运行依赖。`MainMixin` 会将 `Main.add` 改为乘法。模组入口会通过辅助 JVM 附加 Agent，在 `Main` 首次加载时将 `Main.div` 改为双精度浮点除法，同时更新其返回类型、调用点、局部变量和 `println(double)` 重载。当前示例最终输出 `9.0`。
