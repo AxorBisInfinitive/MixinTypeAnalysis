@@ -99,6 +99,8 @@ public final class ExpFabricProvider implements GameProvider {
     @Override
     public void initialize(FabricLauncher launcher) {
         gameVersion = System.getProperty("exp.fabric.version", DEFAULT_GAME_VERSION);
+        // Keep Fabric and Mixin API types shared with the parent loader.
+        launcher.setValidParentClassPath(launcher.getClassPath());
         transformer.locateEntrypoints(launcher, List.of(gameJar));
     }
 
