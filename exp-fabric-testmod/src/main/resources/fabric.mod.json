@@ -1,0 +1,15 @@
+{
+    "schemaVersion": 1,
+    "id": "exp_fabric_testmod",
+    "version": "${project.version}",
+    "name": "Exp Fabric Test Mod",
+    "environment": "*",
+    "entrypoints": {
+        "main": [
+            "love.crysh.exp.fabric.testmod.TestMod"
+        ]
+    },
+    "mixins": [
+        "exp-fabric-testmod.mixins.json"
+    ]
+}
