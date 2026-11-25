@@ -35,6 +35,36 @@ public class ExampleMixin {
 }
 ```
 
+引用表示迁移使用 `parameters` 声明迁移参数和规则类。规则类中的 `@TypeRule` 方法提供来源替换、旧表示编码和读取边界检查。`SOURCE` 的 `method` 使用 owner、方法名和完整 JVM 描述符，规则辅助方法必须是已实现的 static 方法。
+
+```java
+@Mixin(value = Example.class, remap = false)
+public class ExampleMixin {
+    @TypedOverwrite(method = "lookup(J)I",
+            parameters = @ParameterMigration(parameter = 0, rules = ExampleMixin.class))
+    public static int lookup(BlockPos value) {
+        return value.hashCode();
+    }
+
+    @TypeRule(value = TypeRule.Kind.SOURCE, method = "example/BlockPos.asLong()J")
+    private static BlockPos keep(BlockPos value) {
+        return value;
+    }
+
+    @TypeRule(TypeRule.Kind.ENCODE)
+    private static long encode(BlockPos value) {
+        return value.asLong();
+    }
+
+    @TypeRule(TypeRule.Kind.READ)
+    private static BlockPos read(BlockPos value) {
+        return java.util.Objects.requireNonNull(value);
+    }
+}
+```
+
+首版传播覆盖固定批次中的方法内来源、分支、循环、局部变量和局部分配的 `ArrayDeque`。来源不明、容器逃逸、未建模访问和缺少边界转换会汇总为 `TypedOverwriteException`，不会发布部分改写结果。
+
 核心 API 接收一个 ClassLoader 对应的固定类集合，Map 的键使用 JVM 内部类名。调用方负责提供完整的参与类集合。
 
 ```java
@@ -67,6 +97,8 @@ Map<String, byte[]> transformedClasses = plan.apply();
 | 旧方法受到其他修改 | 参数变更时报冲突，包含 `@Final`、`@MixinMerged` 和方法体变化 |
 | 新签名冲突 | 新签名已存在，或多个声明产生同一新签名时报告错误 |
 | 方法句柄 | 旧签名出现在方法引用、bootstrap 参数或动态常量中时报暂未实现 |
+| 引用表示迁移 | 支持单参数 `long -> object`、来源规则、编码规则、读取规则和局部 `ArrayDeque` 摘要 |
+| 传播诊断 | 保存迁移身份、传播依赖、候选规则和稳定排序的根因诊断 |
 
 准备结果和计划持有输入快照，公开返回的字节数组可以独立修改。分析失败和输出验证失败均抛出 `TypedOverwriteException`，其 `diagnostics()` 返回稳定排序的完整诊断。改写不会修改调用方传入的类数据，计划可以重复执行。
 

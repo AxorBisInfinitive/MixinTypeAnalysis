@@ -29,6 +29,11 @@ public final class TypedOverwriteAnalyzer {
         this.resources = resources;
     }
 
+    /** 返回规则容器的内部类名，运行时应在准备批次前读取其 class 资源。 */
+    public static Set<String> requiredRuleClasses(Map<String, byte[]> mixinClasses) {
+        return RepresentationRules.requiredClasses(mixinClasses);
+    }
+
     public PreparedOverwrites prepare(Map<String, byte[]> originals, Map<String, byte[]> mixinClasses) {
         Map<String, byte[]> originalSnapshot = ClassFiles.snapshot(originals);
         List<Diagnostic> diagnostics = new ArrayList<>();
@@ -71,13 +76,19 @@ public final class TypedOverwriteAnalyzer {
                     }
                     validateModifiers(target, original, method, location, diagnostics);
                     if (original.desc.equals(method.desc)) {
+                        if (!((List<?>) ClassFiles.value(annotation, "parameters", List.of())).isEmpty()) {
+                            diagnostics.add(problem("INVALID_REPRESENTATION_RULE", location, "Unchanged descriptor has parameter migration declarations"));
+                        }
                         if (!original.name.equals(method.name)) {
                             addAlias(annotation, original.name);
                         }
                         continue;
                     }
                     nativeOverwrite = false;
-                    validateMigration(target, original, method, location, hierarchy, diagnostics);
+                    MethodKey targetKey = new MethodKey(target.name, original.name, original.desc);
+                    List<RepresentationMigration> representations = RepresentationRules.read(annotation, targetKey, method,
+                            targets, mixins, hierarchy, diagnostics);
+                    validateMigration(target, original, method, location, hierarchy, representations, diagnostics);
                     if (targetNames.size() > 1) {
                         diagnostics.add(problem("MULTI_TARGET_NOT_IMPLEMENTED", location, "Parameter migration needs one target class"));
                     }
@@ -89,11 +100,12 @@ public final class TypedOverwriteAnalyzer {
                     if (!implementations.add(implementationKey)) {
                         diagnostics.add(problem("SIGNATURE_COLLISION", location, implementationKey.toString()));
                     }
-                    migrations.add(new Migration(originalKey, implementationKey, method.access));
+                    migrations.add(new Migration(originalKey, implementationKey, method.access, representations));
                 }
                 if (nativeOverwrite) {
                     annotation.desc = ClassFiles.OVERWRITE;
                     removeValue(annotation, "method");
+                    removeValue(annotation, "parameters");
                 } else if ((method.access & Opcodes.ACC_STATIC) != 0
                         && (method.access & Opcodes.ACC_PRIVATE) == 0) {
                     // Mixin 会重命名非 public synthetic 方法，最终 access 从声明快照恢复。
@@ -161,7 +173,7 @@ public final class TypedOverwriteAnalyzer {
     }
 
     private void validateMigration(ClassNode target, MethodNode original, MethodNode implementation,
-            MethodKey location, ClassHierarchy hierarchy, List<Diagnostic> diagnostics) {
+            MethodKey location, ClassHierarchy hierarchy, List<RepresentationMigration> representations, List<Diagnostic> diagnostics) {
         if (!Type.getReturnType(original.desc).equals(Type.getReturnType(implementation.desc))) {
             diagnostics.add(problem("RETURN_TYPE_NOT_IMPLEMENTED", location,
                     Type.getReturnType(original.desc) + " -> " + Type.getReturnType(implementation.desc)));
@@ -173,7 +185,9 @@ public final class TypedOverwriteAnalyzer {
             return;
         }
         for (int index = 0; index < originalParameters.length; index++) {
-            if (!PrimitiveConversions.isSupported(originalParameters[index], newParameters[index])) {
+            int parameter = index;
+            if (representations.stream().noneMatch(value -> value.parameter() == parameter)
+                    && !PrimitiveConversions.isSupported(originalParameters[index], newParameters[index])) {
                 diagnostics.add(new Diagnostic("PARAMETER_CONVERSION_NOT_IMPLEMENTED", location, -1, index,
                         originalParameters[index] + " -> " + newParameters[index]));
             }

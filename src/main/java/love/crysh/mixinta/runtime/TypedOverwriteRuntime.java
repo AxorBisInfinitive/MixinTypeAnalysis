@@ -50,6 +50,11 @@ public final class TypedOverwriteRuntime {
                     readClasses(metadata.getAsObject().get("mixins"), mixins);
                 }
             }
+            for (String name : TypedOverwriteAnalyzer.requiredRuleClasses(mixins)) {
+                if (!ORIGINALS.containsKey(name) && !mixins.containsKey(name)) {
+                    readClass(name, ORIGINALS);
+                }
+            }
             prepared = new TypedOverwriteAnalyzer(LOADER).prepare(ORIGINALS, mixins);
             Map<String, byte[]> preparedMixins = prepared.mixins();
             Class<?> agent = attachAgent();
@@ -142,12 +147,16 @@ public final class TypedOverwriteRuntime {
         }
         for (CustomValue item : value.getAsArray()) {
             String name = item.getAsString().replace('.', '/');
-            try (var input = LOADER.getResourceAsStream(name + ".class")) {
-                if (input == null) {
-                    throw new IOException("Missing registered class " + name);
-                }
-                destination.put(name, input.readAllBytes());
+            readClass(name, destination);
+        }
+    }
+
+    private static void readClass(String name, Map<String, byte[]> destination) throws IOException {
+        try (var input = LOADER.getResourceAsStream(name + ".class")) {
+            if (input == null) {
+                throw new IOException("Missing registered class " + name);
             }
+            destination.put(name, input.readAllBytes());
         }
     }
 

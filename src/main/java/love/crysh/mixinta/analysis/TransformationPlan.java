@@ -29,12 +29,15 @@ public final class TransformationPlan {
     private final Map<String, byte[]> classes;
     private final List<Migration> migrations;
     private final List<CallSite> calls;
+    private final List<RepresentationPlan> representationPlans;
     private final ClassLoader resources;
 
-    TransformationPlan(Map<String, byte[]> classes, List<Migration> migrations, List<CallSite> calls, ClassLoader resources) {
+    TransformationPlan(Map<String, byte[]> classes, List<Migration> migrations, List<CallSite> calls,
+            List<RepresentationPlan> representationPlans, ClassLoader resources) {
         this.classes = ClassFiles.snapshot(classes);
         this.migrations = List.copyOf(migrations);
         this.calls = List.copyOf(calls);
+        this.representationPlans = List.copyOf(representationPlans);
         this.resources = resources;
     }
 
@@ -48,6 +51,28 @@ public final class TransformationPlan {
         Map<MethodKey, AbstractInsnNode[]> originalInstructions = new HashMap<>();
         Map<MethodKey, Integer> temporaryBases = new HashMap<>();
         Set<String> modified = new HashSet<>();
+        Map<MethodKey, AbstractInsnNode[]> representationInstructions = new HashMap<>();
+        for (RepresentationPlan plan : representationPlans) {
+            for (RepresentationPlan.Edit edit : plan.edits()) {
+                MethodKey key = edit.location().method();
+                MethodNode method = ClassFiles.findMethod(nodes.get(key.owner()), key.name(), key.descriptor());
+                representationInstructions.putIfAbsent(key, method.instructions.toArray());
+            }
+            for (RepresentationPlan.Argument argument : plan.arguments()) {
+                MethodKey key = argument.location().method();
+                MethodNode method = ClassFiles.findMethod(nodes.get(key.owner()), key.name(), key.descriptor());
+                representationInstructions.putIfAbsent(key, method.instructions.toArray());
+            }
+        }
+        for (RepresentationPlan plan : representationPlans) {
+            plan.apply(nodes, representationInstructions);
+            for (RepresentationPlan.Edit edit : plan.edits()) {
+                modified.add(edit.location().method().owner());
+            }
+            for (RepresentationPlan.Argument argument : plan.arguments()) {
+                modified.add(argument.location().method().owner());
+            }
+        }
         for (CallSite call : calls) {
             MethodKey key = call.caller();
             MethodNode method = ClassFiles.findMethod(nodes.get(key.owner()), key.name(), key.descriptor());

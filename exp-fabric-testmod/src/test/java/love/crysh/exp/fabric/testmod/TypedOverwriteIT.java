@@ -123,6 +123,28 @@ class TypedOverwriteIT {
         result.contains("RESULT=25");
     }
 
+    @Test
+    void migratesReferenceRepresentationThroughRuntime() throws Exception {
+        Map<String, String> app = new LinkedHashMap<>();
+        app.put("love.crysh.exp.BlockPos", "package love.crysh.exp; public record BlockPos(long value) { public long asLong(){return value;} }");
+        app.put("love.crysh.exp.Subject", "package love.crysh.exp; public final class Subject { public static int lookup(long value){return (int)value;} public static int run(){return lookup(new BlockPos(12).asLong());} }");
+        app.put("love.crysh.exp.Caller", "package love.crysh.exp; public class Caller {public static int run(){return Subject.run();}}");
+        app.put("love.crysh.exp.Main", "package love.crysh.exp; public final class Main {public static void main(String[] args) throws Exception {System.out.println(\"BUSINESS_EXECUTED\");System.out.println(\"RESULT=\" + Caller.run());}}");
+        String body = """
+                @love.crysh.mixinta.TypedOverwrite(method="lookup(J)I", parameters=@love.crysh.mixinta.ParameterMigration(parameter=0, rules=SubjectMixin.class))
+                public static int lookup(love.crysh.exp.BlockPos value){return (int)value.value();}
+                @love.crysh.mixinta.TypeRule(value=love.crysh.mixinta.TypeRule.Kind.SOURCE, method="love.crysh.exp.BlockPos.asLong()J")
+                private static love.crysh.exp.BlockPos keep(love.crysh.exp.BlockPos value){return value;}
+                @love.crysh.mixinta.TypeRule(value=love.crysh.mixinta.TypeRule.Kind.ENCODE)
+                private static long encode(love.crysh.exp.BlockPos value){return value.value();}
+                @love.crysh.mixinta.TypeRule(value=love.crysh.mixinta.TypeRule.Kind.READ)
+                private static love.crysh.exp.BlockPos read(love.crysh.exp.BlockPos value){return java.util.Objects.requireNonNull(value);}
+                """;
+        Result result = launch(app, Map.of("SubjectMixin", mixin("SubjectMixin", 1000, body)), List.of());
+        result.success();
+        result.contains("RESULT=12");
+    }
+
     @ParameterizedTest
     @ValueSource(strings = {"typed", "native"})
     void sameDescriptorUsesNativeOverwritePriority(String kind) throws Exception {

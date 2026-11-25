@@ -61,9 +61,18 @@ public final class PreparedOverwrites {
         hierarchyNodes.putAll(originalNodes);
         ClassHierarchy hierarchy = new ClassHierarchy(hierarchyNodes, resources);
         Map<MethodKey, Migration> byTarget = new HashMap<>();
+        List<RepresentationPlan> representationPlans = new ArrayList<>();
         for (Migration migration : migrations) {
             byTarget.put(migration.original(), migration);
             validateMergedMethods(migration, nodes, originalNodes, diagnostics);
+            if (!migration.representations().isEmpty()) {
+                List<RepresentationMigration> resolved = migration.representations().stream()
+                        .map(value -> RepresentationRules.resolve(value, nodes, diagnostics)).toList();
+                for (RepresentationMigration representation : resolved) {
+                    representationPlans.add(new RepresentationSolver(nodes, List.of(representation),
+                            Map.of(migration.original(), migration), hierarchy, diagnostics).analyze().plan());
+                }
+            }
         }
         Set<MethodKey> replacedMethods = byTarget.keySet();
         List<CallSite> calls = new ArrayList<>();
@@ -77,7 +86,7 @@ public final class PreparedOverwrites {
             }
         }
         ClassFiles.throwIfErrors(diagnostics);
-        return new TransformationPlan(snapshot, migrations, calls, resources);
+        return new TransformationPlan(snapshot, migrations, calls, representationPlans, resources);
     }
 
     private void validateMergedMethods(Migration migration, Map<String, ClassNode> nodes,
@@ -119,7 +128,7 @@ public final class PreparedOverwrites {
             if (instruction instanceof MethodInsnNode invocation) {
                 Migration migration = findMigration(invocation.owner, invocation.name, invocation.desc,
                         migrations, hierarchy, caller, index, diagnostics);
-                if (migration != null) {
+                if (migration != null && migration.representations().isEmpty()) {
                     methodCalls.add(new CallSite(caller, index, migration));
                 }
             } else if (instruction instanceof LdcInsnNode constant) {

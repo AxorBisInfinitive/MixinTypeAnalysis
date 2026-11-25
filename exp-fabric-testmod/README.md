@@ -1,6 +1,6 @@
 # Exp Fabric 验证模组
 
-这是 `exp-fabric` 的 Loader 集成验证模组。`MainMixin` 使用原生 `@Overwrite` 将 `add` 改为乘法，使用 `@TypedOverwrite` 将 `div(II)I` 迁移为 `div(DD)I`。新实现使用 double 除法，返回计算结果十倍对应的 int，完整示例输出 `90`。
+这是 `exp-fabric` 的 Loader 集成验证模组。`MainMixin` 使用原生 `@Overwrite` 将 `add` 改为乘法，使用 `@TypedOverwrite` 将 `div(II)I` 迁移为 `div(DD)I`，并将 `lookup(J)I` 的参数表示迁移为 `BlockPos`。规则会把 `BlockPos.asLong()` 来源、局部 `Queue<Long>` 的 `add` 和 `poll` 以及 `lookup` 调用连成一条传播链。完整示例输出 `90` 和 `12`。
 
 `fabric.mod.json` 的 `custom.mixinta` 登记 `Main` 和 `MainMixin`。Mixin 配置使用 `TypedOverwritePlugin`，在 Mixin 预处理前安装准备钩子。模组入口先调用 `TypedOverwriteRuntime.initialize()`，在 Exp Main 定义前完成真实 Mixin 处理、整批分析和输出发布。动态附加 Agent、注解准备、结果缓存与类加载转换均由 mixinta 提供。
 
