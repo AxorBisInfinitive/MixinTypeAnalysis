@@ -1,0 +1,116 @@
+package love.crysh.mixinta.analysis;
+
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.Type;
+import org.objectweb.asm.tree.AbstractInsnNode;
+import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.InsnList;
+import org.objectweb.asm.tree.InsnNode;
+import org.objectweb.asm.tree.MethodInsnNode;
+import org.objectweb.asm.tree.MethodNode;
+import org.objectweb.asm.tree.VarInsnNode;
+import org.objectweb.asm.tree.analysis.Analyzer;
+import org.objectweb.asm.tree.analysis.AnalyzerException;
+import org.objectweb.asm.tree.analysis.BasicVerifier;
+
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+
+/**
+ * 计划持有分析时的字节码快照，apply 可重复执行。
+ * 所有输出通过栈帧计算和验证后才返回，失败时原始输入和计划均保持可复用。
+ */
+public final class TransformationPlan {
+    private final Map<String, byte[]> classes;
+    private final List<Migration> migrations;
+    private final List<CallSite> calls;
+    private final ClassLoader resources;
+
+    TransformationPlan(Map<String, byte[]> classes, List<Migration> migrations, List<CallSite> calls, ClassLoader resources) {
+        this.classes = ClassFiles.snapshot(classes);
+        this.migrations = List.copyOf(migrations);
+        this.calls = List.copyOf(calls);
+        this.resources = resources;
+    }
+
+    public int callSiteCount() {
+        return calls.size();
+    }
+
+    public Map<String, byte[]> apply() {
+        List<Diagnostic> diagnostics = new ArrayList<>();
+        Map<String, ClassNode> nodes = ClassFiles.readAll(classes, diagnostics);
+        Map<MethodKey, AbstractInsnNode[]> originalInstructions = new HashMap<>();
+        Map<MethodKey, Integer> temporaryBases = new HashMap<>();
+        Set<String> modified = new HashSet<>();
+        for (CallSite call : calls) {
+            MethodKey key = call.caller();
+            MethodNode method = ClassFiles.findMethod(nodes.get(key.owner()), key.name(), key.descriptor());
+            AbstractInsnNode[] instructions = originalInstructions.computeIfAbsent(key, ignored -> method.instructions.toArray());
+            int temporaryBase = temporaryBases.computeIfAbsent(key, ignored -> method.maxLocals);
+            adaptCall(method, (MethodInsnNode) instructions[call.instruction()], call.migration(), temporaryBase);
+            modified.add(key.owner());
+        }
+        for (Migration migration : migrations) {
+            MethodKey original = migration.original();
+            MethodKey implementation = migration.implementation();
+            ClassNode owner = nodes.get(original.owner());
+            owner.methods.remove(ClassFiles.findMethod(owner, original.name(), original.descriptor()));
+            MethodNode replacement = ClassFiles.findMethod(owner, implementation.name(), implementation.descriptor());
+            replacement.access = migration.access();
+            replacement.visibleAnnotations.removeIf(annotation -> annotation.desc.equals(ClassFiles.TYPED_OVERWRITE));
+            modified.add(owner.name);
+        }
+
+        ClassHierarchy hierarchy = new ClassHierarchy(nodes, resources);
+        Map<String, byte[]> output = ClassFiles.snapshot(classes);
+        for (String name : modified.stream().sorted().toList()) {
+            try {
+                ClassWriter writer = hierarchy.writer();
+                nodes.get(name).accept(writer);
+                byte[] bytes = writer.toByteArray();
+                ClassNode verified = ClassFiles.read(bytes);
+                for (MethodNode method : verified.methods) {
+                    if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) == 0) {
+                        new Analyzer<>(new BasicVerifier()).analyze(name, method);
+                    }
+                }
+                output.put(name, bytes);
+            } catch (AnalyzerException | RuntimeException failure) {
+                diagnostics.add(new Diagnostic("OUTPUT_VERIFICATION_FAILED", null, -1, -1, name + " " + failure.getMessage()));
+            }
+        }
+        ClassFiles.throwIfErrors(diagnostics);
+        return output;
+    }
+
+    private void adaptCall(MethodNode method, MethodInsnNode invocation, Migration migration, int temporaryBase) {
+        Type[] originalParameters = Type.getArgumentTypes(migration.original().descriptor());
+        Type[] newParameters = Type.getArgumentTypes(migration.implementation().descriptor());
+        int[] locals = new int[originalParameters.length];
+        int nextLocal = temporaryBase;
+        for (int index = 0; index < originalParameters.length; index++) {
+            locals[index] = nextLocal;
+            nextLocal += originalParameters[index].getSize();
+        }
+        InsnList conversion = new InsnList();
+        for (int index = originalParameters.length - 1; index >= 0; index--) {
+            conversion.add(new VarInsnNode(originalParameters[index].getOpcode(Opcodes.ISTORE), locals[index]));
+        }
+        for (int index = 0; index < originalParameters.length; index++) {
+            conversion.add(new VarInsnNode(originalParameters[index].getOpcode(Opcodes.ILOAD), locals[index]));
+            for (int opcode : PrimitiveConversions.opcodes(originalParameters[index], newParameters[index])) {
+                conversion.add(new InsnNode(opcode));
+            }
+        }
+        method.instructions.insertBefore(invocation, conversion);
+        invocation.owner = migration.original().owner();
+        invocation.desc = migration.implementation().descriptor();
+        method.maxLocals = Math.max(method.maxLocals, nextLocal);
+    }
+}
