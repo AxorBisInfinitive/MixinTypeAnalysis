@@ -102,6 +102,8 @@ Map<String, byte[]> transformedClasses = plan.apply();
 
 准备结果和计划持有输入快照，公开返回的字节数组可以独立修改。分析失败和输出验证失败均抛出 `TypedOverwriteException`，其 `diagnostics()` 返回稳定排序的完整诊断。改写不会修改调用方传入的类数据，计划可以重复执行。
 
+诊断消息默认按未解决约束分组，包含目标迁移、调用位置、规则要求和一条依赖路径。分析失败的最后一行固定为 `Analysis failed. No transformations published.`。设置系统属性 `-Dmixinta.diagnostics=verbose`，或调用 `format(DiagnosticVerbosity.VERBOSE)`，可追加完整描述符、迁移身份、候选规则和全部传播边。
+
 栈帧所需的层次信息先从输入类读取，再通过资源 ClassLoader 读取外部 class 文件。计算过程中避免定义或初始化被分析的类，缺少层次信息时报告错误。
 
 ## Fabric 运行时接入

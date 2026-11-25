@@ -332,6 +332,35 @@ class RepresentationPropagationTest {
     }
 
     @Test
+    void formatsUnresolvedConstraintContextAndSupportsVerboseOutput() {
+        Diagnostic diagnostic = new Diagnostic(
+                "MISSING_PRODUCER_RULE",
+                new MethodKey("sample/Subject", "run", "(JJZ)J"),
+                27, -1,
+                "Missing source relation sample/BlockPos.asLong()J",
+                "sample/Subject.lookup(J)I parameter=0",
+                List.of(new PropagationEdge("sample/Subject.lookup(J)I parameter=0",
+                        "sample/BlockPos.asLong()J instruction=27", "source")),
+                List.of(), TARGET, 0, "J", "Lsample/BlockPos;",
+                new RuleRequirement("SOURCE", "RECEIVER", "(BlockPos)BlockPos"),
+                List.of(new DependencyStep("sample/BlockPos.asLong()J", 27, "()J"),
+                        new DependencyStep("sample/Subject.lookup(J)I", 53, "(J)I")),
+                "sample/BlockPos.asLong()J");
+        var failure = new TypedOverwriteException(List.of(diagnostic));
+        String normal = failure.format(DiagnosticVerbosity.NORMAL);
+        assertTrue(normal.startsWith("TypedOverwriteException: 1 unresolved constraints"), normal);
+        assertTrue(normal.contains("Target:"), normal);
+        assertTrue(normal.contains("parameter 0: long -> BlockPos"), normal);
+        assertTrue(normal.contains("[MISSING_PRODUCER_RULE]"), normal);
+        assertTrue(normal.contains("Required: SOURCE"), normal);
+        assertTrue(normal.contains("Dependency:"), normal);
+        assertTrue(normal.endsWith("Analysis failed. No transformations published."), normal);
+        String verbose = failure.format(DiagnosticVerbosity.VERBOSE);
+        assertTrue(verbose.contains("sample.Subject.lookup(J)I"), verbose);
+        assertTrue(verbose.contains("sample.Subject.run(JJZ)J"), verbose);
+    }
+
+    @Test
     void experiment4RejectsUnmodeledContainerObservation() {
         Fixture fixture = queueFixture("""
                 queue.add(position(a).asLong());

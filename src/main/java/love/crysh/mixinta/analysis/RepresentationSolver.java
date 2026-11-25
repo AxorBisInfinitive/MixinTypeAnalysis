@@ -50,9 +50,28 @@ final class RepresentationSolver {
         String describe() {
             return method() + " instruction=" + index;
         }
+
+        String symbol() {
+            if (index < 0 || index >= flow.instructions.length) {
+                return method().toString();
+            }
+            AbstractInsnNode instruction = flow.instructions[index];
+            if (instruction instanceof MethodInsnNode call) {
+                return call.owner + "." + call.name + call.desc;
+            }
+            return method().toString();
+        }
+
+        ProgramPoint point() {
+            return new ProgramPoint(method(), index, symbol());
+        }
+
+        ProgramPoint point(String detail) {
+            return new ProgramPoint(method(), index, symbol(), detail);
+        }
     }
 
-    private record Demand(AbstractInsnNode origin, String path) {
+    private record Demand(AbstractInsnNode origin, ProgramPoint parent) {
     }
 
     private static final class Flow {
@@ -242,18 +261,19 @@ final class RepresentationSolver {
                 for (RepresentationMigration declaration : migrations) {
                     if (target.original().equals(declaration.target())) {
                         request(flow.argument(index, call, declaration.parameter()),
-                                new Site(flow, index).describe() + " parameter=" + declaration.parameter(), "target " + target.original());
+                                new Site(flow, index).point("parameter=" + declaration.parameter()),
+                                DependencyKind.TARGET_ARGUMENT);
                     }
                 }
             }
         }
     }
 
-    private void request(SourceValue value, String parent, String reason) {
+    private void request(SourceValue value, ProgramPoint parent, DependencyKind kind) {
         for (AbstractInsnNode origin : ordered(value.insns)) {
-            dependencies.add(new PropagationEdge(parent, sites.get(origin).describe(), reason));
+            dependencies.add(new PropagationEdge(parent, sites.get(origin).point(), kind));
             if (requested.add(origin)) {
-                pending.add(new Demand(origin, sites.get(origin).describe()));
+                pending.add(new Demand(origin, parent));
             }
         }
     }
@@ -276,16 +296,16 @@ final class RepresentationSolver {
                     }
                 } else if (isBox(call)) {
                     migrated.add(origin);
-                    request(site.flow.argument(site.index, call, 0), demand.path, "Long.valueOf");
+                    request(site.flow.argument(site.index, call, 0), site.point(), DependencyKind.BOXING);
                 } else if (isUnbox(call)) {
                     migrated.add(origin);
-                    request(site.flow.receiver(site.index, call), demand.path, "Long.longValue");
+                    request(site.flow.receiver(site.index, call), site.point(), DependencyKind.UNBOXING);
                 } else if (isPoll(call)) {
                     if (!migration.arrayDeque()) {
                         problem("MISSING_CONTAINER_SUMMARY", site, "Missing poll summary " + symbol(call));
                     } else {
                         migrated.add(origin);
-                        requireStorage(site.flow.receiver(site.index, call), demand.path);
+                        requireStorage(site.flow.receiver(site.index, call), site.point());
                     }
                 } else {
                     candidateProblem("MISSING_PRODUCER_RULE", site, "Missing source relation " + symbol(call),
@@ -298,14 +318,14 @@ final class RepresentationSolver {
         }
     }
 
-    private void requireStorage(SourceValue value, String path) {
+    private void requireStorage(SourceValue value, ProgramPoint path) {
         for (AbstractInsnNode origin : ordered(value.insns)) {
             if (origin instanceof TypeInsnNode allocation && allocation.getOpcode() == Opcodes.NEW
                     && allocation.desc.equals("java/util/ArrayDeque")) {
                 storages.add(origin);
-                dependencies.add(new PropagationEdge(path, sites.get(origin).describe(), "ArrayDeque allocation"));
+                dependencies.add(new PropagationEdge(path, sites.get(origin).point(), DependencyKind.CONTAINER_ALLOCATION));
             } else {
-                problem("UNRESOLVED_CONTAINER", sites.get(origin), path + " <- unknown storage at " + sites.get(origin).describe());
+                problem("UNRESOLVED_CONTAINER", sites.get(origin), path.key() + " <- unknown storage at " + sites.get(origin).describe());
             }
         }
     }
@@ -321,18 +341,20 @@ final class RepresentationSolver {
                 if (!touches(receiver, storages)) {
                     continue;
                 }
-                String path = new Site(flow, index).describe();
+                Site site = new Site(flow, index);
+                ProgramPoint path = site.point();
                 for (AbstractInsnNode storage : ordered(receiver.insns)) {
                     if (storages.contains(storage)) {
-                        dependencies.add(new PropagationEdge(sites.get(storage).describe(), path, call.name + " access"));
+                        dependencies.add(new PropagationEdge(sites.get(storage).point(), path,
+                                isAdd(call) ? DependencyKind.CONTAINER_WRITE : DependencyKind.CONTAINER_READ));
                     }
                 }
                 if (isAdd(call)) {
                     requireStorage(receiver, path);
-                    request(flow.argument(index, call, 0), new Site(flow, index).describe(), "add element");
+                    request(flow.argument(index, call, 0), site.point(), DependencyKind.CONTAINER_WRITE);
                 } else if (isPoll(call)) {
                     requireStorage(receiver, path);
-                    request(new SourceValue(1, call), new Site(flow, index).describe(), "poll element");
+                    request(new SourceValue(1, call), site.point(), DependencyKind.CONTAINER_READ);
                 }
             }
         }
@@ -341,7 +363,7 @@ final class RepresentationSolver {
             for (int index = 0; index < flow.instructions.length; index++) {
                 if (flow.frames[index] != null && flow.instructions[index] instanceof MethodInsnNode call
                         && isUnbox(call) && touches(flow.receiver(index, call), migrated)) {
-                    request(new SourceValue(2, call), pathFor(flow.receiver(index, call)), "unbox migrated element");
+                    request(new SourceValue(2, call), firstMigratedPoint(flow.receiver(index, call)), DependencyKind.UNBOXING);
                 }
             }
         }
@@ -361,7 +383,7 @@ final class RepresentationSolver {
                 if (value != null && touches(value, migrated)) {
                     for (AbstractInsnNode source : ordered(value.insns)) {
                         if (migrated.contains(source)) {
-                            request(value, sites.get(source).describe(), "local merge at " + new Site(flow, index).describe());
+                            request(value, new Site(flow, index).point(), DependencyKind.LOCAL_MERGE);
                         }
                     }
                 }
@@ -652,6 +674,11 @@ final class RepresentationSolver {
                 .findFirst().orElse("container migration " + migration.id());
     }
 
+    private ProgramPoint firstMigratedPoint(SourceValue value) {
+        return ordered(value.insns).stream().filter(migrated::contains).map(origin -> sites.get(origin).point())
+                .findFirst().orElse(new ProgramPoint(null, -1, "value migration " + migration.id()));
+    }
+
     private void problem(String code, Site site, String message) {
         candidateProblem(code, site, message, List.of());
     }
@@ -665,26 +692,75 @@ final class RepresentationSolver {
 
     private void finishDiagnostics() {
         for (Issue issue : issues) {
-            Set<String> affected = new HashSet<>();
-            affected.add(issue.site.describe());
+            Set<ProgramPoint> affected = new HashSet<>();
+            affected.add(issue.site.point());
             boolean changed;
             do {
                 changed = false;
                 for (PropagationEdge edge : dependencies) {
-                    if (affected.contains(edge.to())) {
-                        changed |= affected.add(edge.from());
+                    if (affected.contains(edge.toPoint())) {
+                        changed |= affected.add(edge.fromPoint());
                     }
                 }
             } while (changed);
             List<PropagationEdge> relevant = orderedEdges(dependencies.stream()
-                    .filter(edge -> affected.contains(edge.to()) && affected.contains(edge.from())).toList());
+                    .filter(edge -> affected.contains(edge.toPoint()) && affected.contains(edge.fromPoint())).toList());
+            Type originalType = Type.getArgumentTypes(migration.target().descriptor())[migration.parameter()];
+            RuleRequirement requirement = requirement(issue.code);
+            String sourceType = originalType.getDescriptor();
+            String targetType = migration.representation().getDescriptor();
             diagnostics.add(new Diagnostic(issue.code, issue.site.method(), Math.max(-1, issue.site.index), -1,
-                    issue.message, migration.id(), relevant, issue.candidates));
+                    issue.message, migration.id(), relevant, issue.candidates,
+                    migration.target(), migration.parameter(), sourceType, targetType, requirement,
+                    dependencyPath(issue.site.point(), relevant), issue.site.symbol()));
         }
     }
 
+    private RuleRequirement requirement(String code) {
+        return switch (code) {
+            case "MISSING_PRODUCER_RULE" -> new RuleRequirement("SOURCE", "RECEIVER", representationType());
+            case "MISSING_READ_RULE" -> new RuleRequirement("READ", "RECEIVER", representationType());
+            case "MISSING_ENCODE_RULE", "MISSING_BOUNDARY_CONVERSION" -> new RuleRequirement("ENCODE", "RECEIVER", representationType());
+            case "MISSING_CONTAINER_SUMMARY", "UNRESOLVED_CONTAINER" -> new RuleRequirement("CONTAINER_SUMMARY", "RECEIVER", "container");
+            default -> null;
+        };
+    }
+
+    private String representationType() {
+        String name = representation.getClassName();
+        int separator = name.lastIndexOf('.');
+        name = separator < 0 ? name : name.substring(separator + 1);
+        int nested = name.lastIndexOf('$');
+        name = nested < 0 ? name : name.substring(nested + 1);
+        return "(" + name + ")" + name;
+    }
+
+    private List<DependencyStep> dependencyPath(ProgramPoint start, List<PropagationEdge> edges) {
+        List<DependencyStep> path = new ArrayList<>();
+        Set<ProgramPoint> visited = new LinkedHashSet<>();
+        ArrayDeque<ProgramPoint> pending = new ArrayDeque<>();
+        pending.add(start);
+        while (!pending.isEmpty()) {
+            ProgramPoint point = pending.removeFirst();
+            if (!visited.add(point)) {
+                continue;
+            }
+            path.add(step(point));
+            edges.stream().filter(edge -> edge.toPoint().equals(point))
+                    .sorted(java.util.Comparator.comparing(edge -> edge.fromPoint().key()))
+                    .forEach(edge -> pending.addLast(edge.fromPoint()));
+        }
+        return List.copyOf(path);
+    }
+
+    private static DependencyStep step(ProgramPoint point) {
+        String symbol = point.symbol();
+        String descriptor = symbol == null ? "" : symbol.substring(Math.max(0, symbol.indexOf('(')));
+        return new DependencyStep(symbol, point.instruction(), descriptor);
+    }
+
     private static List<PropagationEdge> orderedEdges(java.util.Collection<PropagationEdge> edges) {
-        return edges.stream().sorted(java.util.Comparator.comparing(PropagationEdge::from)
-                .thenComparing(PropagationEdge::to).thenComparing(PropagationEdge::reason)).toList();
+        return edges.stream().sorted(java.util.Comparator.comparing((PropagationEdge edge) -> edge.fromPoint().key())
+                .thenComparing(edge -> edge.toPoint().key()).thenComparing(edge -> edge.kind().name())).toList();
     }
 }

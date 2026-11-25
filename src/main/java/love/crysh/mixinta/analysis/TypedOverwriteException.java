@@ -2,19 +2,20 @@ package love.crysh.mixinta.analysis;
 
 import java.util.Comparator;
 import java.util.List;
-import java.util.stream.Collectors;
 
 public final class TypedOverwriteException extends RuntimeException {
     private final List<Diagnostic> diagnostics;
 
     public TypedOverwriteException(List<Diagnostic> diagnostics) {
-        this(sorted(diagnostics), "TypedOverwrite failed with " + diagnostics.size() + " diagnostic(s)");
+        this(diagnostics, DiagnosticVerbosity.fromProperty());
     }
 
-    private TypedOverwriteException(List<Diagnostic> diagnostics, String summary) {
-        super(diagnostics.stream().map(Diagnostic::toString)
-                .collect(Collectors.joining(System.lineSeparator(),
-                        summary + System.lineSeparator(), "")));
+    public TypedOverwriteException(List<Diagnostic> diagnostics, DiagnosticVerbosity verbosity) {
+        this(sorted(diagnostics), stripHeader(DiagnosticFormatter.format(sorted(diagnostics), verbosity)), true);
+    }
+
+    private TypedOverwriteException(List<Diagnostic> diagnostics, String message, boolean ignored) {
+        super(message);
         this.diagnostics = diagnostics;
     }
 
@@ -22,9 +23,19 @@ public final class TypedOverwriteException extends RuntimeException {
         return diagnostics;
     }
 
+    public String format(DiagnosticVerbosity verbosity) {
+        return DiagnosticFormatter.format(diagnostics, verbosity);
+    }
+
+    private static String stripHeader(String message) {
+        String header = "TypedOverwriteException: ";
+        return message.startsWith(header) ? message.substring(header.length()) : message;
+    }
+
     private static List<Diagnostic> sorted(List<Diagnostic> diagnostics) {
         return diagnostics.stream().sorted(Comparator
-                .comparing((Diagnostic diagnostic) -> String.valueOf(diagnostic.method()))
+                .comparing((Diagnostic diagnostic) -> String.valueOf(diagnostic.target()))
+                .thenComparing((Diagnostic diagnostic) -> String.valueOf(diagnostic.method()))
                 .thenComparingInt(Diagnostic::instruction)
                 .thenComparingInt(Diagnostic::parameter)
                 .thenComparing(Diagnostic::code)

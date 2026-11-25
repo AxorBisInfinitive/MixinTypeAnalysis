@@ -175,8 +175,8 @@ class TypedOverwriteIT {
         app.put("love.crysh.exp.OtherCaller", "package love.crysh.exp; public class OtherCaller {public static Object ref(){return (java.util.function.IntBinaryOperator)Subject::div;}}");
         Result result = launch(app, Map.of("SubjectMixin", mixin("SubjectMixin", 1000,
                 TYPED + " public static int div(double a,double b){return (int)(a/b);}")), List.of());
-        result.failure("TypedOverwrite failed with 2 diagnostic(s)", "METHOD_HANDLE_NOT_IMPLEMENTED",
-                "love/crysh/exp/Caller.ref", "love/crysh/exp/OtherCaller.ref");
+        result.failure("2 unresolved constraints", "METHOD_HANDLE_NOT_IMPLEMENTED",
+                "Caller.ref", "OtherCaller.ref");
     }
 
     @Test
