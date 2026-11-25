@@ -4,15 +4,18 @@
 
 ## 构建
 
-在仓库根目录依次构建业务工程、桥接工程和验证模组。
+在仓库根目录依次构建主工程、业务工程、桥接工程和验证模组。
 
 ```powershell
+mvn clean install
 mvn -f exp/pom.xml clean install
 mvn -f exp-fabric/pom.xml clean package
 mvn -f exp-fabric-testmod/pom.xml clean package
 ```
 
 `exp-fabric-testmod` 以 `provided` 依赖 `love.crysh:exp:0.1.0-Snapshot`，所以先安装 `exp` 可让 IDE 解析 `Main` 及其 sources JAR。此依赖只用于编译，不会打入验证模组。运行时业务 JAR 由 `exp-fabric` 加入 Knot classpath。
+
+`exp-fabric-testmod` 以 `compile` scope 依赖主工程 `love.crysh:mixin-type-analysis:0.1.0-Snapshot`，并将其 JAR 嵌入 `META-INF/jars/`。Fabric Loader 根据 testmod 的 `fabric.mod.json` 发现并加载 `mixinta` 模组。
 
 ## 运行
 

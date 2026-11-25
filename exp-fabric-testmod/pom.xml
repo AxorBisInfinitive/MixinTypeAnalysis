@@ -11,6 +11,7 @@
     <properties>
         <maven.compiler.release>25</maven.compiler.release>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
+        <mixinta.version>0.1.0-Snapshot</mixinta.version>
         <fabric-loader.version>0.20.1</fabric-loader.version>
         <mixin.version>0.17.5+mixin.0.8.7</mixin.version>
         <asm.version>9.10.1</asm.version>
@@ -24,6 +25,12 @@
     </repositories>
 
     <dependencies>
+        <dependency>
+            <groupId>love.crysh</groupId>
+            <artifactId>mixin-type-analysis</artifactId>
+            <version>${mixinta.version}</version>
+            <scope>compile</scope>
+        </dependency>
         <dependency>
             <groupId>love.crysh</groupId>
             <artifactId>exp</artifactId>
@@ -58,6 +65,31 @@
             </resource>
         </resources>
         <plugins>
+            <plugin>
+                <groupId>org.apache.maven.plugins</groupId>
+                <artifactId>maven-dependency-plugin</artifactId>
+                <version>3.9.0</version>
+                <executions>
+                    <execution>
+                        <id>include-mixinta</id>
+                        <phase>process-resources</phase>
+                        <goals><goal>copy</goal></goals>
+                        <configuration>
+                            <artifactItems>
+                                <artifactItem>
+                                    <groupId>love.crysh</groupId>
+                                    <artifactId>mixin-type-analysis</artifactId>
+                                    <version>${mixinta.version}</version>
+                                    <type>jar</type>
+                                    <outputDirectory>${project.build.outputDirectory}/META-INF/jars</outputDirectory>
+                                    <destFileName>mixin-type-analysis-${mixinta.version}.jar</destFileName>
+                                    <overWrite>true</overWrite>
+                                </artifactItem>
+                            </artifactItems>
+                        </configuration>
+                    </execution>
+                </executions>
+            </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>

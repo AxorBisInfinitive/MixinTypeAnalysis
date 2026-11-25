@@ -11,5 +11,13 @@
     },
     "mixins": [
         "exp-fabric-testmod.mixins.json"
+    ],
+    "depends": {
+        "mixinta": "${mixinta.version}"
+    },
+    "jars": [
+        {
+            "file": "META-INF/jars/mixin-type-analysis-${mixinta.version}.jar"
+        }
     ]
 }

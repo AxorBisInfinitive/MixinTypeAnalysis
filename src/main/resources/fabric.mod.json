@@ -1,0 +1,20 @@
+{
+    "schemaVersion": 1,
+    "id": "mixinta",
+    "version": "${project.version}",
+    "name": "Mixin Type Analysis",
+    "authors": [
+        "AxorBisInfinitive"
+    ],
+    "license": "MIT",
+    "environment": "*",
+    "entrypoints": {
+        "main": [
+            "love.crysh.mixinta.MixinTypeAnalysis"
+        ]
+    },
+    "depends": {
+        "fabricloader": ">=${fabric-loader.version}",
+        "java": ">=${maven.compiler.release}"
+    }
+}

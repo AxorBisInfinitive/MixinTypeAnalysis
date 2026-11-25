@@ -1,5 +1,6 @@
 package love.crysh.exp.fabric.testmod;
 
+import love.crysh.mixinta.MixinTypeAnalysis;
 import net.fabricmc.api.ModInitializer;
 
 import java.io.IOException;
@@ -13,6 +14,7 @@ public final class TestMod implements ModInitializer {
     @Override
     public void onInitialize() {
         System.out.println("exp-fabric-testmod entrypoint initialized");
+        System.out.println("mixinta dependency loaded: " + MixinTypeAnalysis.class.getName());
         installAgent();
     }
 
