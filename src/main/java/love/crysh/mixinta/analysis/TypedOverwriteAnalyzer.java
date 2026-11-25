@@ -94,9 +94,10 @@ public final class TypedOverwriteAnalyzer {
                 if (nativeOverwrite) {
                     annotation.desc = ClassFiles.OVERWRITE;
                     removeValue(annotation, "method");
-                } else if ((method.access & Opcodes.ACC_STATIC) != 0) {
-                    // Mixin 允许合并 synthetic static 方法，最终 access 从声明快照恢复。
-                    method.access |= Opcodes.ACC_SYNTHETIC;
+                } else if ((method.access & Opcodes.ACC_STATIC) != 0
+                        && (method.access & Opcodes.ACC_PRIVATE) == 0) {
+                    // Mixin 会重命名非 public synthetic 方法，最终 access 从声明快照恢复。
+                    method.access = (method.access & ~Opcodes.ACC_PROTECTED) | Opcodes.ACC_PUBLIC | Opcodes.ACC_SYNTHETIC;
                 }
             }
         }

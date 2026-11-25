@@ -4,6 +4,12 @@
     "version": "${project.version}",
     "name": "Exp Fabric Test Mod",
     "environment": "*",
+    "custom": {
+        "mixinta": {
+            "classes": ["love.crysh.exp.Main"],
+            "mixins": ["love.crysh.exp.fabric.testmod.mixin.MainMixin"]
+        }
+    },
     "entrypoints": {
         "main": [
             "love.crysh.exp.fabric.testmod.TestMod"

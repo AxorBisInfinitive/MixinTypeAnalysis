@@ -15,6 +15,7 @@
         <fabric-loader.version>0.20.1</fabric-loader.version>
         <mixin.version>0.17.5+mixin.0.8.7</mixin.version>
         <asm.version>9.10.1</asm.version>
+        <junit.version>5.14.4</junit.version>
     </properties>
 
     <repositories>
@@ -25,6 +26,12 @@
     </repositories>
 
     <dependencies>
+        <dependency>
+            <groupId>org.junit.jupiter</groupId>
+            <artifactId>junit-jupiter</artifactId>
+            <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
         <dependency>
             <groupId>love.crysh</groupId>
             <artifactId>mixin-type-analysis</artifactId>
@@ -94,22 +101,23 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-compiler-plugin</artifactId>
                 <version>3.16.0</version>
-                <configuration>
-                    <compilerArgs>
-                        <arg>--add-modules=jdk.attach</arg>
-                    </compilerArgs>
-                </configuration>
             </plugin>
             <plugin>
                 <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-jar-plugin</artifactId>
-                <version>3.4.2</version>
+                <artifactId>maven-failsafe-plugin</artifactId>
+                <version>3.6.1</version>
+                <executions>
+                    <execution>
+                        <goals>
+                            <goal>integration-test</goal>
+                            <goal>verify</goal>
+                        </goals>
+                    </execution>
+                </executions>
                 <configuration>
-                    <archive>
-                        <manifestEntries>
-                            <Agent-Class>love.crysh.exp.fabric.testmod.agent.MainDivAgent</Agent-Class>
-                        </manifestEntries>
-                    </archive>
+                    <systemPropertyVariables>
+                        <project.directory>${project.basedir}</project.directory>
+                    </systemPropertyVariables>
                 </configuration>
             </plugin>
         </plugins>
