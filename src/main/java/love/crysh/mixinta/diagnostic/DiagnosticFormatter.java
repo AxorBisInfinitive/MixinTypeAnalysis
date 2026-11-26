@@ -90,7 +90,13 @@ final class DiagnosticFormatter {
     private static void appendDiagnostic(StringBuilder output, Diagnostic diagnostic, DiagnosticVerbosity verbosity) {
         output.append(System.lineSeparator()).append("[").append(diagnostic.code()).append("]").append(System.lineSeparator());
         if (diagnostic.method() != null) {
-            output.append("    instruction ").append(diagnostic.instruction()).append(": ")
+            output.append("    ");
+            if (diagnostic.instruction() < 0 && diagnostic.parameter() >= 0) {
+                output.append("parameter ").append(diagnostic.parameter()).append(": ");
+            } else {
+                output.append("instruction ").append(diagnostic.instruction()).append(": ");
+            }
+            output
                     .append(diagnostic.failureSymbol().isEmpty()
                             ? displayMethod(diagnostic.method(), verbosity)
                             : displaySymbol(diagnostic.failureSymbol(), verbosity))
@@ -176,8 +182,12 @@ final class DiagnosticFormatter {
         List<ProgramPoint> goals = diagnostic.containers().stream().map(context -> new ProgramPoint(context.storage().method(),
                 context.storage().instruction(), context.storage().symbol(), "channel=" + context.channel())).toList();
         if (!diagnostic.code().equals("CONTAINER_FACT_CONFLICT") && diagnostic.method() != null) {
-            goals = List.of(new ProgramPoint(diagnostic.method(), diagnostic.instruction(), diagnostic.failureSymbol(),
-                    diagnostic.parameter() < 0 ? "" : "parameter=" + diagnostic.parameter()));
+            if (diagnostic.code().equals("REPRESENTATION_PLAN_CONFLICT") && diagnostic.instruction() < 0) {
+                goals = requirement.anchors();
+            } else {
+                goals = List.of(new ProgramPoint(diagnostic.method(), diagnostic.instruction(), diagnostic.failureSymbol(),
+                        diagnostic.parameter() < 0 ? "" : "parameter=" + diagnostic.parameter()));
+            }
         }
         List<ProgramPoint> destinations = goals;
         var roots = requirement.dependencies().stream()

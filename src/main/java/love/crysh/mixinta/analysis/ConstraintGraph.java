@@ -15,7 +15,7 @@ import java.util.Set;
 
 /** 元素约束按值、参数与完整通道保存关联，引用调用图提供传递依据。 */
 final class ConstraintGraph {
-    enum Kind { VALUE, USE, STORAGE }
+    enum Kind { VALUE, USE, STORAGE, UNKNOWN }
 
     record Subject(ProgramPoint location, Kind kind, int parameter, StorageSlot storage) {
         ProgramPoint point() {
@@ -23,6 +23,7 @@ final class ConstraintGraph {
                 case VALUE -> "";
                 case USE -> "parameter=" + parameter;
                 case STORAGE -> "channel=" + storage.channel();
+                case UNKNOWN -> "";
             };
             return new ProgramPoint(location.method(), location.instruction(), location.symbol(), detail);
         }
@@ -46,6 +47,10 @@ final class ConstraintGraph {
         var point = new ProgramPoint(allocation.method(), allocation.instruction(),
                 descriptor.substring(1, descriptor.length() - 1));
         return new Subject(point, Kind.STORAGE, -1, slot);
+    }
+
+    static Subject unknown(ProgramPoint point) {
+        return new Subject(new ProgramPoint(point.method(), point.instruction(), point.symbol()), Kind.UNKNOWN, -1, null);
     }
 
     void link(Subject from, Subject to, DependencyKind kind) {

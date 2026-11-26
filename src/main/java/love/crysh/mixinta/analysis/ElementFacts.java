@@ -69,7 +69,8 @@ final class ElementFacts {
     static MigrationRequirement requirement(RepresentationMigration declaration, RepresentationSolver.Analysis analysis,
             java.util.Collection<ConstraintGraph.Subject> subjects) {
         return new MigrationRequirement(declaration.id(), declaration.target(), declaration.parameter(),
-                declaration.representation().getDescriptor(), analysis.graph().evidence(subjects));
+                declaration.representation().getDescriptor(), analysis.graph().evidence(subjects),
+                subjects.stream().map(ConstraintGraph.Subject::point).distinct().toList());
     }
 
     boolean value(RepresentationPlan.Location location, Type representation) {

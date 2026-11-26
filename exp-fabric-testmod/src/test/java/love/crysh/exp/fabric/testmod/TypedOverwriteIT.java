@@ -678,11 +678,12 @@ class TypedOverwriteIT {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"compatible", "independent", "conflict", "rules", "boxed", "primitive", "transfer", "missing", "null", "external"})
+    @ValueSource(strings = {"compatible", "independent", "conflict", "rules", "boxed", "primitive", "transfer", "missing", "null", "external", "unknown-merge"})
     void coordinatesRepresentationRequirementsThroughRealMixin(String scenario) throws Exception {
         boolean independent = scenario.equals("independent");
         boolean cross = List.of("boxed", "primitive", "transfer").contains(scenario);
-        boolean compatible = scenario.equals("compatible") || cross || scenario.equals("missing") || scenario.equals("external");
+        boolean compatible = scenario.equals("compatible") || cross || scenario.equals("missing")
+                || scenario.equals("external") || scenario.equals("unknown-merge");
         String type = compatible || scenario.equals("rules") ? "BlockPos" : "OtherPos";
         String rules = """
                 package fixture;
@@ -737,6 +738,12 @@ class TypedOverwriteIT {
                     return first(a.peek()) + second(a.peek());
                     """.formatted(scenario.equals("missing") ? "12L" : "new BlockPos(12).asLong()",
                             scenario.equals("external") ? "a.toArray();" : "");
+            case "unknown-merge" -> """
+                    java.util.Queue<Long> local = new java.util.ArrayDeque<>();
+                    local.add(new BlockPos(12).asLong());
+                    java.util.Queue<Long> merged = flag ? local : external;
+                    return first(merged.peek()) + second(local.peek());
+                    """;
             case "null" -> """
                     Long empty = null;
                     java.util.Queue<Long> a = new java.util.LinkedList<>();
@@ -747,8 +754,12 @@ class TypedOverwriteIT {
                     """;
             default -> null;
         };
-        if (body != null) methods = methods.substring(0, methods.indexOf("public static long run()"))
-                + "public static long run(){" + body + "}";
+        if (body != null) {
+            String fields = scenario.equals("unknown-merge")
+                    ? "public static boolean flag; public static java.util.Queue<Long> external;" : "";
+            methods = methods.substring(0, methods.indexOf("public static long run()")) + fields
+                    + "public static long run(){" + body + "}";
+        }
         Map<String, String> app = new LinkedHashMap<>();
         app.put(SUBJECT, "package love.crysh.exp; public final class Subject {" + methods + "}");
         app.put("love.crysh.exp.BlockPos", "package love.crysh.exp; public record BlockPos(long value){public long asLong(){return value;}}");
@@ -796,11 +807,13 @@ class TypedOverwriteIT {
                 case "conflict" -> "CONTAINER_FACT_CONFLICT";
                 case "missing" -> "MISSING_PRODUCER_RULE";
                 case "external" -> "UNKNOWN_CONTAINER_USE";
+                case "unknown-merge" -> "UNRESOLVED_CONTAINER";
                 default -> "REPRESENTATION_RULE_CONFLICT";
             };
             result.failure(code,
                     "Storage:", "Channel:", "Operation:", "Analysis failed. No transformations published.");
             if (scenario.equals("external")) result.contains("Operation: UNKNOWN_OPERATION");
+            if (scenario.equals("unknown-merge")) result.contains("State: UNKNOWN", "Operation: READ");
             assertFalse(result.log().contains("OUTPUT_VERIFICATION_FAILED"), result.log());
         }
     }

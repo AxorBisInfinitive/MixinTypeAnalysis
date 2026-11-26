@@ -54,7 +54,7 @@ class TypedBatchBoundaryTest {
 
     @Test
     void doesNotRequireEncodingForBoxingRemovedByAnotherDeclaration() throws Exception {
-        var base = fixture("""
+        var base = TypedBatchRepresentationTest.fixture("""
                 long value = new BlockPos(12).asLong();
                 java.util.Queue<Long> a = new java.util.ArrayDeque<>();
                 java.util.Queue<Long> b = new java.util.ArrayDeque<>();
@@ -98,7 +98,7 @@ class TypedBatchBoundaryTest {
 
     @Test
     void leavesStandaloneRuleConflictWithoutUnrelatedStorageContext() {
-        var fixture = fixture("""
+        var fixture = TypedBatchRepresentationTest.fixture("""
                 java.util.Queue<Long> q = new java.util.ArrayDeque<>();
                 q.add(new BlockPos(12).asLong());
                 long standalone = new BlockPos(3).asLong();
@@ -140,6 +140,122 @@ class TypedBatchBoundaryTest {
         assertEquals(1, unknown.containers().size());
         assertEquals(unknown.instruction(), unknown.containers().getFirst().access().instruction());
         assertEquals("UNKNOWN_OPERATION", unknown.containers().getFirst().operation());
+    }
+
+    @Test
+    void retainsUnknownContainerOriginAndMarksKnownMergedStorageUnknown() {
+        var fixture = TypedBatchRepresentationTest.fixture("""
+                java.util.Queue<Long> local = new java.util.ArrayDeque<>();
+                local.add(new BlockPos(12).asLong());
+                java.util.Queue<Long> merged = flag ? local : external;
+                return first(merged.peek()) + second(local.peek());
+                """, "BlockPos", "RulesA", false, Map.of(), "",
+                "public static boolean flag; public static java.util.Queue<Long> external;");
+        var failure = failure(fixture);
+        var unresolved = failure.diagnostics().stream().filter(d -> d.code().equals("UNRESOLVED_CONTAINER"))
+                .findFirst().orElseThrow();
+        assertEquals(1, unresolved.containers().size());
+        assertEquals("UNKNOWN", unresolved.containers().getFirst().state().name());
+        assertFalse(unresolved.migrations().isEmpty());
+        assertFalse(unresolved.migrations().getFirst().dependencies().isEmpty());
+        assertRealPath(unresolved);
+    }
+
+    @Test
+    void preservesDistinctUnknownContainerFormalParameters() {
+        var fixture = TypedBatchRepresentationTest.fixture("return 0;", "BlockPos", "RulesA", false,
+                Map.of(), "", """
+                        public static int external(java.util.Queue<Long> a, java.util.Queue<Long> b) {
+                            return first(a.peek()) + first(b.peek());
+                        }
+                        """);
+        var unresolved = failure(fixture).diagnostics().stream().filter(d -> d.code().equals("UNRESOLVED_CONTAINER")).toList();
+        assertEquals(2, unresolved.size());
+        assertEquals(2, unresolved.stream().map(Diagnostic::parameter).distinct().count());
+        assertTrue(unresolved.stream().allMatch(d -> !d.migrations().getFirst().dependencies().isEmpty()));
+    }
+
+    @Test
+    void associatesUnsupportedArithmeticWithItsMigratedInputs() {
+        var fixture = TypedBatchRepresentationTest.fixture("""
+                java.util.Queue<Long> queue = new java.util.ArrayDeque<>();
+                queue.add(new BlockPos(12).asLong());
+                long value = queue.peek();
+                return first(value) + (int)(value + 1);
+                """, "BlockPos", "RulesA", false);
+        var unsupported = failure(fixture).diagnostics().stream().filter(d -> d.code().equals("UNSUPPORTED_VALUE_USE"))
+                .findFirst().orElseThrow();
+        assertFalse(unsupported.migrations().getFirst().dependencies().isEmpty());
+        assertRealPath(unsupported);
+        assertTrue(unsupported.containers().stream().anyMatch(context -> context.state().name().equals("UNKNOWN")));
+    }
+
+    @Test
+    void distinguishesMigratedValuesCapturedAtOneDynamicCall() {
+        var fixture = TypedBatchRepresentationTest.fixture("""
+                long firstValue = new BlockPos(12).asLong();
+                long secondValue = new BlockPos(3).asLong();
+                int result = first(firstValue) + first(secondValue);
+                java.util.function.LongSupplier supplier = () -> firstValue + secondValue;
+                return result + (int)supplier.getAsLong();
+                """, "BlockPos", "RulesA", false);
+        var captures = failure(fixture).diagnostics().stream().filter(d -> d.code().equals("UNSUPPORTED_VALUE_USE")).toList();
+        assertEquals(2, captures.size());
+        assertEquals(java.util.Set.of(0, 1), captures.stream().map(Diagnostic::parameter).collect(java.util.stream.Collectors.toSet()));
+        assertTrue(captures.stream().allMatch(d -> !d.migrations().getFirst().dependencies().isEmpty()));
+    }
+
+    @Test
+    void excludesUnrelatedDeclarationFromLocalMetadataConflict() {
+        var base = TypedBatchRepresentationTest.fixture("""
+                long value = new BlockPos(12).asLong();
+                int firstResult = first(value);
+                value = new BlockPos(3).asLong();
+                int secondResult = second(value);
+                long independent = new BlockPos(8).asLong();
+                return firstResult + secondResult + third(independent);
+                """, "OtherPos", "RulesB", false, Map.of(), "",
+                "public static int third(long value) { return (int)value; }");
+        var mixins = new LinkedHashMap<>(base.mixins());
+        var mixin = ClassFiles.read(mixins.get("sample/SubjectMixin"));
+        var first = mixin.methods.stream().filter(method -> method.name.equals("first")).findFirst().orElseThrow();
+        var third = new org.objectweb.asm.tree.MethodNode(first.access, "third", first.desc, first.signature,
+                first.exceptions.toArray(String[]::new));
+        first.accept(third);
+        third.visibleAnnotations.stream().filter(annotation -> annotation.desc.equals(ClassFiles.TYPED_OVERWRITE))
+                .forEach(annotation -> {
+                    for (int index = 0; index < annotation.values.size(); index += 2) {
+                        if (annotation.values.get(index).equals("method")) annotation.values.set(index + 1, "third(J)I");
+                    }
+                });
+        mixin.methods.add(third);
+        mixins.put(mixin.name, ClassFiles.write(mixin));
+        var conflict = failure(new BytecodeFixtures.Fixture(base.originals(), mixins)).diagnostics().stream()
+                .filter(d -> d.code().equals("REPRESENTATION_PLAN_CONFLICT")).findFirst().orElseThrow();
+        assertEquals(java.util.Set.of("first", "second"), conflict.migrations().stream()
+                .map(requirement -> requirement.target().name()).collect(java.util.stream.Collectors.toSet()));
+        assertTrue(conflict.migrations().stream().allMatch(requirement -> !requirement.dependencies().isEmpty()));
+    }
+
+    @Test
+    void attributesSharedMethodMetadataConflictToItsDeclarations() {
+        var fixture = TypedBatchRepresentationTest.fixture("""
+                java.util.Queue<Long> firstQueue = new java.util.ArrayDeque<>();
+                java.util.Queue<Long> secondQueue = new java.util.ArrayDeque<>();
+                firstQueue.add(new BlockPos(12).asLong());
+                secondQueue.add(new BlockPos(3).asLong());
+                int size = observe(firstQueue) + observe(secondQueue);
+                return first(firstQueue.peek()) + second(secondQueue.peek()) + size;
+                """, "OtherPos", "RulesB", false, Map.of(), "",
+                "public static int observe(java.util.Queue<Long> queue) { return queue.size(); }");
+        var failure = failure(fixture);
+        var conflict = failure.diagnostics().stream().filter(d -> d.code().equals("REPRESENTATION_PLAN_CONFLICT"))
+                .findFirst().orElseThrow();
+        assertEquals(java.util.Set.of("first", "second"), conflict.migrations().stream()
+                .map(requirement -> requirement.target().name()).collect(java.util.stream.Collectors.toSet()));
+        assertTrue(conflict.migrations().stream().allMatch(requirement -> !requirement.dependencies().isEmpty()));
+        assertFalse(failure.format(love.crysh.mixinta.diagnostic.DiagnosticVerbosity.NORMAL)
+                .contains("Dependency path unavailable."), failure.format(love.crysh.mixinta.diagnostic.DiagnosticVerbosity.NORMAL));
     }
 
     @Test

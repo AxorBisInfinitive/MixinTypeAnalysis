@@ -47,8 +47,9 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
         for (RepresentationPlan plan : plans) {
             for (Edit edit : plan.edits()) {
                 Edit previous = edits.putIfAbsent(edit.location(), edit);
-                if (previous != null && !previous.equals(edit)) {
-                    conflict(edit.location(), "Instruction requires different edits", diagnostics);
+                if (previous != null && !sameEdit(previous, edit)) {
+                    conflict(edit.location(), "Instruction requires different edits", diagnostics,
+                            List.of(previous.source(), edit.source()));
                 }
             }
             for (Argument argument : plan.arguments()) {
@@ -58,7 +59,8 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
                         || !previous.implementation().equals(argument.implementation())
                         || !previous.representation().equals(argument.representation())
                         || !Objects.equals(previous.encoder(), argument.encoder()))) {
-                    conflict(argument.location(), "Argument requires incompatible conversions parameter=" + argument.parameter(), diagnostics);
+                    conflict(argument.location(), "Argument requires incompatible conversions parameter=" + argument.parameter(), diagnostics,
+                            List.of(previous.source(), argument.source()));
                 }
             }
             for (Local local : plan.locals()) {
@@ -72,15 +74,18 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
                     var original = ClassFiles.findMethod(classes.get(local.method().owner()), local.method().name(),
                             local.method().descriptor()).localVariables.get(local.index());
                     locals.put(key, new Local(local.method(), local.index(), local.descriptor(),
-                            mergeSignature(original.signature, previous.signature(), local.signature())));
+                            mergeSignature(original.signature, previous.signature(), local.signature()), previous.source()));
                 } catch (IllegalArgumentException failure) {
-                    conflict(new Location(local.method(), -1), failure.getMessage() + " local=" + local.index(), diagnostics);
+                    conflict(new Location(local.method(), -1), failure.getMessage() + " local=" + local.index(), diagnostics,
+                            List.of(previous.source(), local.source()));
                 }
             }
             for (Bridge bridge : plan.bridges()) {
                 Bridge previous = bridges.putIfAbsent(bridge.method(), bridge);
-                if (previous != null && !previous.equals(bridge)) {
-                    conflict(new Location(bridge.method(), -1), "Rule bridge requires different helpers", diagnostics);
+                if (previous != null && !previous.method().equals(bridge.method())
+                        || previous != null && !previous.helper().equals(bridge.helper())) {
+                    conflict(new Location(bridge.method(), -1), "Rule bridge requires different helpers", diagnostics,
+                            List.of(previous.source(), bridge.source()));
                 }
             }
         }
@@ -88,7 +93,8 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
         while (argumentEntries.hasNext()) {
             var entry = argumentEntries.next();
             if (entry.getValue().values().stream().map(Argument::implementation).distinct().count() > 1) {
-                conflict(entry.getKey(), "Invocation requires incompatible final descriptors", diagnostics);
+                conflict(entry.getKey(), "Invocation requires incompatible final descriptors", diagnostics,
+                        entry.getValue().values().stream().map(Argument::source).toList());
             }
             if (edits.containsKey(entry.getKey())) {
                 Edit edit = edits.get(entry.getKey());
@@ -96,9 +102,11 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
                 if (edit.observation() && entry.getValue().size() == 1 && query != null && query.encoder() != null
                         && query.original().equals(query.implementation())) {
                     edits.put(entry.getKey(), new Edit(edit.location(), edit.action(), edit.helper(), edit.representation(), edit.binding(),
-                            edit.parameter(), new Encoding(query.representation(), query.encoder())));
+                            edit.parameter(), new Encoding(query.representation(), query.encoder()), edit.source()));
                     argumentEntries.remove();
-                } else conflict(entry.getKey(), "Invocation replacement overlaps argument conversion", diagnostics);
+                } else conflict(entry.getKey(), "Invocation replacement overlaps argument conversion", diagnostics,
+                        java.util.stream.Stream.concat(java.util.stream.Stream.of(edit.source()),
+                                entry.getValue().values().stream().map(Argument::source)).toList());
             }
         }
         return new RepresentationPlan(List.copyOf(edits.values()), arguments.values().stream()
@@ -109,7 +117,20 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
     }
 
     private static void conflict(Location location, String message, List<Diagnostic> diagnostics) {
-        diagnostics.add(new Diagnostic("REPRESENTATION_PLAN_CONFLICT", location.method(), location.instruction(), -1, message));
+        conflict(location, message, diagnostics, List.of());
+    }
+
+    private static boolean sameEdit(Edit first, Edit second) {
+        return first.location().equals(second.location()) && first.action().equals(second.action())
+                && Objects.equals(first.helper(), second.helper()) && first.representation().equals(second.representation())
+                && first.binding() == second.binding() && first.parameter() == second.parameter()
+                && Objects.equals(first.query(), second.query());
+    }
+
+    private static void conflict(Location location, String message, List<Diagnostic> diagnostics,
+            List<love.crysh.mixinta.diagnostic.MigrationRequirement> requirements) {
+        diagnostics.add(new Diagnostic("REPRESENTATION_PLAN_CONFLICT", location.method(), location.instruction(), -1, message)
+                .withMigrations(requirements.stream().filter(Objects::nonNull).distinct().toList()));
     }
 
     private static String mergeSignature(String original, String first, String second) {
@@ -145,9 +166,15 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
     record Encoding(Type representation, MethodKey helper) { }
 
     record Edit(Location location, String action, MethodKey helper, Type representation,
-            TypeRule.Binding binding, int parameter, Encoding query) {
+            TypeRule.Binding binding, int parameter, Encoding query,
+            love.crysh.mixinta.diagnostic.MigrationRequirement source) {
         Edit(Location location, String action, MethodKey helper, Type representation, TypeRule.Binding binding, int parameter) {
-            this(location, action, helper, representation, binding, parameter, null);
+            this(location, action, helper, representation, binding, parameter, null, null);
+        }
+
+        Edit(Location location, String action, MethodKey helper, Type representation, TypeRule.Binding binding, int parameter,
+                love.crysh.mixinta.diagnostic.MigrationRequirement source) {
+            this(location, action, helper, representation, binding, parameter, null, source);
         }
 
         boolean observation() {
@@ -271,13 +298,15 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
     }
 
     record Argument(Location location, MethodKey original, MethodKey implementation, int parameter,
-            Type representation, MethodKey encoder, String migration) {
+            Type representation, MethodKey encoder, String migration,
+            love.crysh.mixinta.diagnostic.MigrationRequirement source) {
     }
 
-    record Local(MethodKey method, int index, String descriptor, String signature) {
+    record Local(MethodKey method, int index, String descriptor, String signature,
+            love.crysh.mixinta.diagnostic.MigrationRequirement source) {
     }
 
-    record Bridge(MethodKey method, MethodKey helper) {
+    record Bridge(MethodKey method, MethodKey helper, love.crysh.mixinta.diagnostic.MigrationRequirement source) {
         void apply(ClassNode owner) {
             MethodNode existing = ClassFiles.findMethod(owner, method.name(), method.descriptor());
             if (existing != null) {

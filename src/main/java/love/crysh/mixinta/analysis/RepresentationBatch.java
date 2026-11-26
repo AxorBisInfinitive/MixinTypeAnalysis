@@ -95,13 +95,7 @@ final class RepresentationBatch {
         sessions.forEach(session -> session.analysis = session.solver.plan());
         List<Diagnostic> planDiagnostics = new ArrayList<>();
         var plan = RepresentationPlan.merge(sessions.stream().map(session -> session.analysis.plan()).toList(), classes, planDiagnostics);
-        for (Diagnostic diagnostic : planDiagnostics) {
-            List<MigrationRequirement> requirements = sessions.stream().filter(session -> session.analysis.plan().changes().stream()
-                    .anyMatch(change -> change.method().equals(diagnostic.method())
-                            && (diagnostic.instruction() < 0 || change.instruction() == diagnostic.instruction())))
-                    .flatMap(session -> session.requirements().stream()).toList();
-            diagnostics.add(diagnostic.withMigrations(requirements));
-        }
+        diagnostics.addAll(planDiagnostics);
         return plan;
     }
 
@@ -116,22 +110,35 @@ final class RepresentationBatch {
                 && first.id().equals(second.id()) && first.representation().equals(second.representation());
     }
 
-    private record IssueKey(String code, MethodKey method, int instruction, int parameter, String source, String target, int origin) { }
+    private record IssueKey(String code, MethodKey method, int instruction, int parameter, String source, String target,
+            String identity) { }
 
     private static List<Diagnostic> mergeDiagnostics(List<Diagnostic> diagnostics) {
         Map<IssueKey, Diagnostic> merged = new LinkedHashMap<>();
         for (Diagnostic diagnostic : diagnostics) {
-            int origin = diagnostic.instruction() < 0 && !diagnostic.dependencyPath().isEmpty()
-                    ? diagnostic.dependencyPath().getFirst().instruction() : diagnostic.instruction();
             var key = new IssueKey(diagnostic.code(), diagnostic.method(), diagnostic.instruction(), diagnostic.parameter(),
-                    diagnostic.sourceType(), diagnostic.targetType(), origin);
+                    diagnostic.sourceType(), diagnostic.targetType(), diagnostic.failureSymbol());
             merged.merge(key, diagnostic, (first, second) -> new Diagnostic(first.code(), first.method(), first.instruction(), first.parameter(),
                     first.message(), first.migration(), java.util.stream.Stream.concat(first.propagation().stream(), second.propagation().stream()).distinct().toList(),
                     java.util.stream.Stream.concat(first.candidates().stream(), second.candidates().stream()).distinct().toList(),
                     first.target(), first.targetParameter(), first.sourceType(), first.targetType(), first.requirement(), first.dependencyPath(), first.failureSymbol(),
                     java.util.stream.Stream.concat(first.containers().stream(), second.containers().stream()).distinct().toList(),
-                    java.util.stream.Stream.concat(first.migrations().stream(), second.migrations().stream()).distinct().toList()));
+                    mergeRequirements(first.migrations(), second.migrations())));
         }
+        return List.copyOf(merged.values());
+    }
+
+    private static List<MigrationRequirement> mergeRequirements(List<MigrationRequirement> first,
+            List<MigrationRequirement> second) {
+        Map<String, MigrationRequirement> merged = new LinkedHashMap<>();
+        java.util.stream.Stream.concat(first.stream(), second.stream()).forEach(requirement -> {
+            String key = requirement.target() + "#" + requirement.parameter() + "#" + requirement.id()
+                    + "#" + requirement.representation();
+            merged.merge(key, requirement, (left, right) -> new MigrationRequirement(left.id(), left.target(), left.parameter(),
+                    left.representation(), java.util.stream.Stream.concat(left.dependencies().stream(), right.dependencies().stream())
+                            .distinct().toList(), java.util.stream.Stream.concat(left.anchors().stream(), right.anchors().stream())
+                            .distinct().toList()));
+        });
         return List.copyOf(merged.values());
     }
 

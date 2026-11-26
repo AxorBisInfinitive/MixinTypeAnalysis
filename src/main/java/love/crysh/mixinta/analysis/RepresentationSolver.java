@@ -120,7 +120,8 @@ final class RepresentationSolver {
     private final Map<MethodKey, RepresentationPlan.Bridge> bridges = new LinkedHashMap<>();
     private final Type representation;
 
-    private record Issue(String code, Site site, int parameter, String message, List<String> candidates, Set<StorageSlot> storages) {
+    private record Issue(String code, Site site, int parameter, String message, List<String> candidates,
+            Set<StorageSlot> storages, Set<ConstraintGraph.Subject> anchors, String identity) {
     }
 
     RepresentationSolver(Map<String, ClassNode> classes, List<RepresentationMigration> migrations,
@@ -220,11 +221,7 @@ final class RepresentationSolver {
     }
 
     private Set<ConstraintGraph.Subject> subjects(Issue issue) {
-        if (issue.code().contains("PRODUCER") || issue.code().contains("SOURCE")
-                || issue.parameter() < 0 && issue.site().index >= 0 && requested.contains(issue.site().flow.instructions[issue.site().index])) {
-            return Set.of(ConstraintGraph.value(issue.site().point()));
-        }
-        return Set.of(ConstraintGraph.use(issue.site().point(), issue.parameter()));
+        return issue.anchors();
     }
 
     private Set<StorageSlot> relatedStorages(Issue issue) {
@@ -422,14 +419,19 @@ final class RepresentationSolver {
             graph.link(ConstraintGraph.value(path), ConstraintGraph.storage(slot), DependencyKind.CONTAINER_ALLOCATION);
             dependencies.add(new PropagationEdge(path, storagePoint(slot.storage()), DependencyKind.CONTAINER_ALLOCATION));
             if (slot.channel() == 0 && ContainerSummary.mapOwner(Type.getType(slot.storage().descriptor()).getInternalName())) {
-                problem("MAP_KEY_MIGRATION_NOT_IMPLEMENTED", site(path), "Map key representation requires equality and hash rules");
+                candidateProblem("MAP_KEY_MIGRATION_NOT_IMPLEMENTED", site(path), -1,
+                        "Map key representation requires equality and hash rules", List.of(), Set.of(slot),
+                        Set.of(ConstraintGraph.value(path)), "channel=0");
             }
         }
         for (ProgramPoint origin : references.unknownOrigins()) {
             Site site = site(origin);
             dependencies.add(new PropagationEdge(path, origin, DependencyKind.CONTAINER_ALLOCATION));
-            candidateProblem("UNRESOLVED_CONTAINER", site,
-                    path.key() + " <- unknown storage at " + origin.symbol(), summaryCandidates(site));
+            graph.link(ConstraintGraph.value(path), ConstraintGraph.unknown(origin), DependencyKind.CONTAINER_ALLOCATION);
+            candidateProblem("UNRESOLVED_CONTAINER", site, formalParameter(site),
+                    path.key() + " <- unknown storage at " + origin.symbol(), summaryCandidates(site),
+                    references.slots(channel), Set.of(ConstraintGraph.unknown(origin)),
+                    origin.method() + "#" + origin.instruction() + "#" + origin.symbol());
         }
     }
 
@@ -528,7 +530,11 @@ final class RepresentationSolver {
                     for (int parameter = 0; parameter < arguments; parameter++) {
                         SourceValue value = frame.getStack(frame.getStackSize() - arguments + parameter);
                         if (touches(value, migrated) && !nullOnly(value)) {
-                            problem("UNSUPPORTED_VALUE_USE", site, pathFor(value) + " <- invokedynamic argument at " + site.describe());
+                            var use = ConstraintGraph.use(site.point("capture=" + parameter), parameter);
+                            linkUse(use, value);
+                            candidateProblem("UNSUPPORTED_VALUE_USE", site, parameter,
+                                    pathFor(value) + " <- invokedynamic argument at " + site.describe(), List.of(), Set.of(),
+                                    Set.of(use), "capture=" + parameter);
                         }
                     }
                 } else if (instruction instanceof LdcInsnNode constant) {
@@ -625,9 +631,12 @@ final class RepresentationSolver {
     }
 
     private void linkUse(Site site, int parameter, SourceValue value) {
+        linkUse(ConstraintGraph.use(site.point(), parameter), value);
+    }
+
+    private void linkUse(ConstraintGraph.Subject use, SourceValue value) {
         if (value == null) return;
         for (AbstractInsnNode origin : ordered(value.insns)) {
-            var use = ConstraintGraph.use(site.point(), parameter);
             var producer = ConstraintGraph.value(sites.get(origin).point());
             graph.link(use, producer, DependencyKind.SOURCE_RESULT);
             if (migrated.contains(origin)) graph.link(producer, use, DependencyKind.SOURCE_RESULT);
@@ -673,6 +682,20 @@ final class RepresentationSolver {
         return owner.substring(0, Math.max(0, owner.lastIndexOf('/')));
     }
 
+    private static int formalParameter(Site site) {
+        if (site.index >= 0) return -1;
+        int local = -1 - site.index;
+        boolean isStatic = (site.flow.method.access & Opcodes.ACC_STATIC) != 0;
+        if (!isStatic && local == 0) return -1;
+        int slot = isStatic ? 0 : 1;
+        Type[] parameters = Type.getArgumentTypes(site.flow.method.desc);
+        for (int parameter = 0; parameter < parameters.length; parameter++) {
+            if (slot == local) return parameter;
+            slot += parameters[parameter].getSize();
+        }
+        return -1;
+    }
+
     private void requireEncoder(Site site) {
         helper(TypeRule.Kind.ENCODE, site);
     }
@@ -704,14 +727,15 @@ final class RepresentationSolver {
                     var encoder = helper(TypeRule.Kind.ENCODE, site);
                     String action = ContainerSummary.mapOwner(call.owner) ? "observe-map-values" : "observe-view-elements";
                     edits.add(new RepresentationPlan.Edit(location(site), action, accessibleHelper(encoder.helper(), site),
-                            representation, TypeRule.Binding.RECEIVER, 0));
+                            representation, TypeRule.Binding.RECEIVER, 0, sourceRequirement(graph.at(site.point(), -1))));
                     changes.add(new PlanChange(flow.key, index, action, migration.id(), encoder.id()));
                     int parameter = summary(site, call).observedParameter();
                     var value = flow.argument(index, call, parameter);
                     if (touches(value, migrated) && !nullOnly(value)) {
                         var queryEncoder = helper(TypeRule.Kind.ENCODE, site, parameter);
                         arguments.add(new RepresentationPlan.Argument(location(site), symbol(call), symbol(call), parameter,
-                                representation, accessibleHelper(queryEncoder.helper(), site), migration.id()));
+                                representation, accessibleHelper(queryEncoder.helper(), site), migration.id(),
+                                sourceRequirement(List.of(ConstraintGraph.use(site.point(), parameter)))));
                         changes.add(new PlanChange(flow.key, index, "encode-argument", migration.id(), queryEncoder.id()));
                     }
                 } else {
@@ -736,7 +760,8 @@ final class RepresentationSolver {
                         MethodKey replacement = target != null
                                 ? new MethodKey(call.owner, call.name, target.implementation().descriptor()) : original;
                         arguments.add(new RepresentationPlan.Argument(location(site), original, replacement, parameter,
-                                representation, encoder == null ? null : accessibleHelper(encoder.helper(), site), migration.id()));
+                                representation, encoder == null ? null : accessibleHelper(encoder.helper(), site), migration.id(),
+                                sourceRequirement(List.of(ConstraintGraph.use(site.point(), parameter)))));
                         changes.add(new PlanChange(flow.key, index, matchingTarget ? "reference-argument" : "encode-argument",
                                 migration.id(), encoder == null ? "" : encoder.id()));
                     }
@@ -750,7 +775,8 @@ final class RepresentationSolver {
 
     private void edit(Site site, String action, RepresentationMigration.Rule rule) {
         edits.add(new RepresentationPlan.Edit(location(site), action, rule == null ? null : accessibleHelper(rule.helper(), site), representation,
-                rule == null ? TypeRule.Binding.RECEIVER : rule.binding(), rule == null ? 0 : rule.parameter()));
+                rule == null ? TypeRule.Binding.RECEIVER : rule.binding(), rule == null ? 0 : rule.parameter(),
+                sourceRequirement(graph.at(site.point(), -1))));
         changes.add(new PlanChange(site.method(), site.index, action, migration.id(), rule == null ? "" : rule.id()));
     }
 
@@ -769,7 +795,7 @@ final class RepresentationSolver {
             while (names.contains(name)) name += "$";
             MethodKey bridge = new MethodKey(owner.name, name, key.descriptor());
             changes.add(new PlanChange(bridge, -1, "generate-rule-bridge", migration.id(), key.toString()));
-            return new RepresentationPlan.Bridge(bridge, key);
+            return new RepresentationPlan.Bridge(bridge, key, sourceRequirement(graph.at(site.point(), -1)));
         }).method();
     }
 
@@ -789,7 +815,10 @@ final class RepresentationSolver {
                 SourceValue value = frame.getLocal(variable.index);
                 if ((variable.desc.equals("J") || variable.desc.equals("Ljava/lang/Long;")) && touches(value, migrated)) {
                     if (nullOnly(value)) continue;
-                    locals.add(new RepresentationPlan.Local(flow.key, local, representation.getDescriptor(), null));
+                    Set<ConstraintGraph.Subject> origins = value.insns.stream().map(sites::get).filter(java.util.Objects::nonNull)
+                            .map(origin -> ConstraintGraph.value(origin.point())).collect(java.util.stream.Collectors.toSet());
+                    locals.add(new RepresentationPlan.Local(flow.key, local, representation.getDescriptor(), null,
+                            sourceRequirement(origins)));
                     break;
                 }
                 if (variable.signature != null && touchesStorage(flow.aliases.local(index, variable.index))) {
@@ -799,12 +828,22 @@ final class RepresentationSolver {
                                     && !ContainerSummary.supportsAllocation(Type.getType(reference.storage().descriptor()).getInternalName()))
                             .flatMap(reference -> storages.stream().filter(slot -> slot.storage().equals(reference.storage())))
                             .map(StorageSlot::channel).collect(java.util.stream.Collectors.toSet());
+                    Set<ConstraintGraph.Subject> origins = references.references().stream().map(reference -> reference.slot(
+                            channels.isEmpty() ? 0 : channels.iterator().next())).map(ConstraintGraph::storage)
+                            .collect(java.util.stream.Collectors.toSet());
                     locals.add(new RepresentationPlan.Local(flow.key, local, variable.desc,
-                            storageSignature(variable.signature, channels.isEmpty() ? null : channels)));
+                            storageSignature(variable.signature, channels.isEmpty() ? null : channels), sourceRequirement(origins)));
                     break;
                 }
             }
         }
+    }
+
+    private love.crysh.mixinta.diagnostic.MigrationRequirement sourceRequirement(
+            java.util.Collection<ConstraintGraph.Subject> anchors) {
+        return new love.crysh.mixinta.diagnostic.MigrationRequirement(migration.id(), migration.target(), migration.parameter(),
+                representation.getDescriptor(), graph.evidence(anchors),
+                anchors.stream().map(ConstraintGraph.Subject::point).distinct().toList());
     }
 
     private String storageSignature(String signature, Set<Integer> channels) {
@@ -974,15 +1013,33 @@ final class RepresentationSolver {
     }
 
     private void candidateProblem(String code, Site site, int parameter, String message, List<String> candidates, Set<StorageSlot> slots) {
+        Set<ConstraintGraph.Subject> anchors = new LinkedHashSet<>();
         var use = ConstraintGraph.use(site.point(), parameter);
-        if (site.index >= 0 && !graph.contains(use)) {
+        if (code.equals("MISSING_PRODUCER_RULE") || code.equals("AMBIGUOUS_SOURCE_RULE")) {
+            anchors.add(ConstraintGraph.value(site.point()));
+        } else {
+            anchors.add(use);
+        }
+        if (site.index >= 0) {
             for (AbstractInsnNode origin : site.flow.consumed.getOrDefault(site.flow.instructions[site.index], Set.of())) {
-                if (migrated.contains(origin)) graph.link(use, ConstraintGraph.value(sites.get(origin).point()), DependencyKind.SOURCE_RESULT);
+                if (migrated.contains(origin)) {
+                    var value = ConstraintGraph.value(sites.get(origin).point());
+                    graph.link(use, value, DependencyKind.SOURCE_RESULT);
+                    graph.link(value, use, DependencyKind.SOURCE_RESULT);
+                    anchors.add(value);
+                }
             }
         }
-        String key = code + " " + site.describe() + " parameter=" + parameter;
+        candidateProblem(code, site, parameter, message, candidates, slots, anchors, "");
+    }
+
+    private void candidateProblem(String code, Site site, int parameter, String message, List<String> candidates,
+            Set<StorageSlot> slots, Set<ConstraintGraph.Subject> anchors, String identity) {
+        int diagnosticParameter = parameter < 0 && site.index < 0 ? formalParameter(site) : parameter;
+        String key = code + " " + site.describe() + " parameter=" + diagnosticParameter + " identity=" + identity
+                + " anchors=" + anchors.stream().map(ConstraintGraph.Subject::point).map(ProgramPoint::key).sorted().toList();
         if (diagnosticKeys.add(key)) {
-            issues.add(new Issue(code, site, parameter, message, candidates, Set.copyOf(slots)));
+            issues.add(new Issue(code, site, diagnosticParameter, message, candidates, Set.copyOf(slots), Set.copyOf(anchors), identity));
         }
     }
 
@@ -994,8 +1051,9 @@ final class RepresentationSolver {
             List<PropagationEdge> relevant = graph.evidence(anchors);
             Type originalType = Type.getArgumentTypes(migration.target().descriptor())[migration.parameter()];
             var requirement = new love.crysh.mixinta.diagnostic.MigrationRequirement(migration.id(), migration.target(), migration.parameter(),
-                    representation.getDescriptor(), relevant);
-            Diagnostic diagnostic = new Diagnostic(issue.code, issue.site.method(), Math.max(-1, issue.site.index), issue.parameter,
+                    representation.getDescriptor(), relevant, anchors.stream().map(ConstraintGraph.Subject::point).distinct().toList());
+            int instruction = issue.site.index;
+            Diagnostic diagnostic = new Diagnostic(issue.code, issue.site.method(), instruction, issue.parameter,
                     issue.message, migration.id(), orderedEdges(java.util.stream.Stream.concat(relevant.stream(), referenceEvidence(relatedStorages(issue)).stream()).toList()), issue.candidates,
                     migration.target(), migration.parameter(), originalType.getDescriptor(), representation.getDescriptor(), requirement(issue.code),
                     dependencyPath(issue.site.point(), relevant), issue.site.symbol());
@@ -1036,13 +1094,25 @@ final class RepresentationSolver {
                 result.add(context(slot, site(point), operation));
                 continue;
             }
-            var matching = containerUses.stream().filter(use -> use.summary() != null && use.receivers().slots(use.summary().channel()).contains(slot))
+            var matching = containerUses.stream().filter(use -> {
+                ContainerSummary summary = use.summary() == null ? containers.resolve(use.call()) : use.summary();
+                return summary != null && use.receivers().slots(summary.channel()).contains(slot);
+            })
                     .sorted(java.util.Comparator.comparing((ContainerUse use) -> !use.site().point().equals(point))
-                            .thenComparing(use -> code.contains("PRODUCER") ? !use.summary().writesElement() : !use.summary().readsElement())
-                            .thenComparing(use -> !path.contains(ConstraintGraph.value(use.site().point()).point())
-                                    && !path.contains(ConstraintGraph.use(use.site().point(), use.summary().elementParameter()).point()))
+                            .thenComparing(use -> {
+                                ContainerSummary summary = use.summary() == null ? containers.resolve(use.call()) : use.summary();
+                                return code.contains("PRODUCER") ? !summary.writesElement() : !summary.readsElement();
+                            })
+                            .thenComparing(use -> {
+                                ContainerSummary summary = use.summary() == null ? containers.resolve(use.call()) : use.summary();
+                                return !path.contains(ConstraintGraph.value(use.site().point()).point())
+                                        && !path.contains(ConstraintGraph.use(use.site().point(), summary.elementParameter()).point());
+                            })
                             .thenComparing(use -> use.site().point().key())).findFirst();
-            matching.ifPresent(use -> result.add(context(slot, use.site(), use.summary().operation().name())));
+            matching.ifPresent(use -> {
+                ContainerSummary summary = use.summary() == null ? containers.resolve(use.call()) : use.summary();
+                result.add(context(slot, use.site(), summary.operation().name()));
+            });
         }
         return List.copyOf(result);
     }
