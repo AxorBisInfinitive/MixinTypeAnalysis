@@ -67,6 +67,8 @@ public class ExampleMixin {
 
 局部 `HashMap` 和 `LinkedHashMap` 支持 `put`、`get`、`remove`、`containsKey`、`containsValue`、`size`、`isEmpty` 和 `clear`。value 独立传播新表示，key 保持原存储表示，已迁移值用作 key 时通过 `ENCODE` 恢复为 Long。`containsValue` 通过生成的编码比较方法保持旧表示的查询行为，相关查询需要 `ENCODE` 规则。
 
+容器引用按方法内的指令位置、局部槽和操作数栈位置建立显式别名事实，保留全部可能的分配位置、未知来源和 null。局部赋值、引用 cast、分支、循环、异常路径和栈复制共享对应存储约束，局部槽复用按各自生命周期处理。字段、数组读取和普通方法返回的容器仍作为未知来源参与检查。
+
 核心 API 接收一个 ClassLoader 对应的固定类集合，Map 的键使用 JVM 内部类名。调用方负责提供完整的参与类集合。
 
 ```java

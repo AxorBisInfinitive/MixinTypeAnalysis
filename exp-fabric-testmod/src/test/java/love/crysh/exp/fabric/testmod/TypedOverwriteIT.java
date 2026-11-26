@@ -124,7 +124,7 @@ class TypedOverwriteIT {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"direct", "queue", "list", "map"})
+    @ValueSource(strings = {"direct", "queue", "list", "map", "aliases"})
     void migratesReferenceRepresentationThroughRuntime(String scenario) throws Exception {
         String operation = switch (scenario) {
             case "queue" -> """
@@ -151,6 +151,16 @@ class TypedOverwriteIT {
                     map.remove(value);
                     if (!map.isEmpty()) throw new AssertionError();
                     return result;
+                    """;
+            case "aliases" -> """
+                    java.util.Queue<Long> first = new java.util.ArrayDeque<>();
+                    java.util.Queue<Long> second = new java.util.LinkedList<>();
+                    first.add(new BlockPos(12).asLong());
+                    second.add(new BlockPos(12).asLong());
+                    Object alias = first;
+                    for (int index = 0; index < 3; index++) alias = alias == first ? second : first;
+                    if (!(alias instanceof java.util.Queue)) throw new AssertionError();
+                    return lookup(((java.util.Queue<Long>) alias).poll());
                     """;
             default -> "return lookup(new BlockPos(12).asLong());";
         };
