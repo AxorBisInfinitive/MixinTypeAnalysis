@@ -84,12 +84,21 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
                 }
             }
         }
-        for (var entry : arguments.entrySet()) {
+        var argumentEntries = arguments.entrySet().iterator();
+        while (argumentEntries.hasNext()) {
+            var entry = argumentEntries.next();
             if (entry.getValue().values().stream().map(Argument::implementation).distinct().count() > 1) {
                 conflict(entry.getKey(), "Invocation requires incompatible final descriptors", diagnostics);
             }
             if (edits.containsKey(entry.getKey())) {
-                conflict(entry.getKey(), "Invocation replacement overlaps argument conversion", diagnostics);
+                Edit edit = edits.get(entry.getKey());
+                Argument query = entry.getValue().get(0);
+                if (edit.observation() && entry.getValue().size() == 1 && query != null && query.encoder() != null
+                        && query.original().equals(query.implementation())) {
+                    edits.put(entry.getKey(), new Edit(edit.location(), edit.action(), edit.helper(), edit.representation(), edit.binding(),
+                            edit.parameter(), new Encoding(query.representation(), query.encoder())));
+                    argumentEntries.remove();
+                } else conflict(entry.getKey(), "Invocation replacement overlaps argument conversion", diagnostics);
             }
         }
         return new RepresentationPlan(List.copyOf(edits.values()), arguments.values().stream()
@@ -133,8 +142,18 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
     record Location(MethodKey method, int instruction) {
     }
 
+    record Encoding(Type representation, MethodKey helper) { }
+
     record Edit(Location location, String action, MethodKey helper, Type representation,
-            TypeRule.Binding binding, int parameter) {
+            TypeRule.Binding binding, int parameter, Encoding query) {
+        Edit(Location location, String action, MethodKey helper, Type representation, TypeRule.Binding binding, int parameter) {
+            this(location, action, helper, representation, binding, parameter, null);
+        }
+
+        boolean observation() {
+            return action.equals("observe-map-values") || action.equals("observe-view-elements");
+        }
+
         void apply(ClassNode owner, MethodNode method, AbstractInsnNode instruction) {
             switch (action) {
                 case "load-reference" -> method.instructions.set(instruction,
@@ -198,9 +217,9 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
             code.add(new InsnNode(Opcodes.IRETURN));
             observation.maxLocals = 3;
             owner.methods.add(observation);
-            if (parameter == 1) {
+            if (query != null) {
                 InsnList conversion = new InsnList();
-                encodeBoxed(conversion, helper, representation);
+                encodeBoxed(conversion, query.helper(), query.representation());
                 method.instructions.insertBefore(invocation, conversion);
             }
             invocation.setOpcode(Opcodes.INVOKESTATIC);

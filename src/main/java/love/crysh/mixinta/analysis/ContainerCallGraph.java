@@ -360,8 +360,10 @@ final class ContainerCallGraph {
     }
 
     private void bindEdges(Set<PropagationEdge> edges, Binding binding, MethodContainerSummary.Call call, MethodContainerSummary.Value value) {
-        edges.add(new PropagationEdge(bindingPoint(binding), call.point(), DependencyKind.CONTAINER_CALL_ARGUMENT));
-        originEdges(edges, call.point(), call.point().method(), value, DependencyKind.CONTAINER_CALL_ARGUMENT);
+        ProgramPoint argument = new ProgramPoint(call.point().method(), call.point().instruction(), call.point().symbol(),
+                "parameter=" + binding.parameter());
+        edges.add(new PropagationEdge(bindingPoint(binding), argument, DependencyKind.CONTAINER_CALL_ARGUMENT));
+        originEdges(edges, argument, call.point().method(), value, DependencyKind.CONTAINER_CALL_ARGUMENT);
     }
 
     private void originEdges(Set<PropagationEdge> edges, ProgramPoint parent, MethodKey method,

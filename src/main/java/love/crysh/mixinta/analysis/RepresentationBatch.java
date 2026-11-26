@@ -1,6 +1,7 @@
 package love.crysh.mixinta.analysis;
 
 import love.crysh.mixinta.bytecode.ClassHierarchy;
+import love.crysh.mixinta.anno.TypeRule;
 import love.crysh.mixinta.diagnostic.ContainerContext;
 import love.crysh.mixinta.diagnostic.Diagnostic;
 import love.crysh.mixinta.diagnostic.MigrationRequirement;
@@ -36,6 +37,14 @@ final class RepresentationBatch {
             return declarations.stream().map(value -> new MigrationRequirement(value.id(), value.target(), value.parameter(),
                     value.representation().getDescriptor(), analysis.dependencies())).toList();
         }
+
+        MigrationRequirement requirement(ProgramPoint point, RepresentationSolver.RuleUse use) {
+            return ElementFacts.requirement(declarations.getFirst(), analysis, List.of(subject(point, use)));
+        }
+
+        ConstraintGraph.Subject subject(ProgramPoint point, RepresentationSolver.RuleUse use) {
+            return use.kind() == TypeRule.Kind.SOURCE ? ConstraintGraph.value(point) : ConstraintGraph.use(point, use.parameter());
+        }
     }
 
     static RepresentationPlan analyze(List<RepresentationMigration> declarations, Map<String, ClassNode> classes,
@@ -49,12 +58,12 @@ final class RepresentationBatch {
             session.analysis = session.solver.solve(inputs.get(contracts));
             if (session.solver.input() != null) inputs.putIfAbsent(contracts, session.solver.input());
         }
-        ElementFacts facts = new ElementFacts();
+        ElementFacts initial = facts(sessions);
         for (Session session : sessions) {
-            session.analysis = session.solver.finish();
-            facts.add(session.declarations, session.analysis, session.diagnostics.isEmpty());
-            diagnostics.addAll(session.diagnostics);
+            session.solver.validate(initial);
+            session.analysis = session.solver.result();
         }
+        ElementFacts facts = facts(sessions);
         validateIdentities(sessions, diagnostics);
         for (var entry : facts.storages.entrySet()) {
             if (entry.getValue().state() == ElementState.CONFLICT) {
@@ -67,19 +76,63 @@ final class RepresentationBatch {
         for (var entry : facts.values.entrySet()) {
             if (entry.getValue().state() != ElementState.CONFLICT) continue;
             List<MigrationRequirement> requirements = entry.getValue().requirements();
-            boolean covered = facts.storages.values().stream().filter(value -> value.state() == ElementState.CONFLICT)
-                    .anyMatch(value -> value.requirements().containsAll(requirements));
+            var point = sessions.stream().map(session -> session.analysis.points().get(entry.getKey())).filter(Objects::nonNull).findFirst().orElseThrow();
+            boolean covered = facts.storages.entrySet().stream().filter(storage -> storage.getValue().state() == ElementState.CONFLICT)
+                    .anyMatch(storage -> requirements.stream().allMatch(requirement -> storage.getValue().requirements().stream()
+                            .anyMatch(owner -> sameRequirement(owner, requirement))) && sessions.stream()
+                            .filter(session -> session.analysis.values().contains(entry.getKey()))
+                            .allMatch(session -> session.analysis.graph().storages(List.of(ConstraintGraph.value(point))).contains(storage.getKey())));
             if (!covered) {
-                var location = entry.getKey();
-                diagnostics.add(conflict("VALUE_FACT_CONFLICT", new ProgramPoint(location.method(), location.instruction(),
-                        location.method().toString()), -1, requirements, "Incompatible representations for one value"));
+                diagnostics.add(conflict("VALUE_FACT_CONFLICT", point, -1, requirements, "Incompatible representations for one value"));
             }
         }
         validateRules(sessions, facts, diagnostics);
+        List<Diagnostic> issues = sessions.stream().flatMap(session -> session.solver.diagnostics(facts).stream()).toList();
+        diagnostics.addAll(mergeDiagnostics(issues));
         if (!diagnostics.isEmpty()) {
             return new RepresentationPlan(List.of(), List.of(), List.of(), List.of(), List.of(), List.of());
         }
-        return RepresentationPlan.merge(sessions.stream().map(session -> session.analysis.plan()).toList(), classes, diagnostics);
+        sessions.forEach(session -> session.analysis = session.solver.plan());
+        List<Diagnostic> planDiagnostics = new ArrayList<>();
+        var plan = RepresentationPlan.merge(sessions.stream().map(session -> session.analysis.plan()).toList(), classes, planDiagnostics);
+        for (Diagnostic diagnostic : planDiagnostics) {
+            List<MigrationRequirement> requirements = sessions.stream().filter(session -> session.analysis.plan().changes().stream()
+                    .anyMatch(change -> change.method().equals(diagnostic.method())
+                            && (diagnostic.instruction() < 0 || change.instruction() == diagnostic.instruction())))
+                    .flatMap(session -> session.requirements().stream()).toList();
+            diagnostics.add(diagnostic.withMigrations(requirements));
+        }
+        return plan;
+    }
+
+    private static ElementFacts facts(List<Session> sessions) {
+        ElementFacts facts = new ElementFacts();
+        sessions.forEach(session -> facts.add(session.declarations, session.analysis));
+        return facts;
+    }
+
+    private static boolean sameRequirement(MigrationRequirement first, MigrationRequirement second) {
+        return first.target().equals(second.target()) && first.parameter() == second.parameter()
+                && first.id().equals(second.id()) && first.representation().equals(second.representation());
+    }
+
+    private record IssueKey(String code, MethodKey method, int instruction, int parameter, String source, String target, int origin) { }
+
+    private static List<Diagnostic> mergeDiagnostics(List<Diagnostic> diagnostics) {
+        Map<IssueKey, Diagnostic> merged = new LinkedHashMap<>();
+        for (Diagnostic diagnostic : diagnostics) {
+            int origin = diagnostic.instruction() < 0 && !diagnostic.dependencyPath().isEmpty()
+                    ? diagnostic.dependencyPath().getFirst().instruction() : diagnostic.instruction();
+            var key = new IssueKey(diagnostic.code(), diagnostic.method(), diagnostic.instruction(), diagnostic.parameter(),
+                    diagnostic.sourceType(), diagnostic.targetType(), origin);
+            merged.merge(key, diagnostic, (first, second) -> new Diagnostic(first.code(), first.method(), first.instruction(), first.parameter(),
+                    first.message(), first.migration(), java.util.stream.Stream.concat(first.propagation().stream(), second.propagation().stream()).distinct().toList(),
+                    java.util.stream.Stream.concat(first.candidates().stream(), second.candidates().stream()).distinct().toList(),
+                    first.target(), first.targetParameter(), first.sourceType(), first.targetType(), first.requirement(), first.dependencyPath(), first.failureSymbol(),
+                    java.util.stream.Stream.concat(first.containers().stream(), second.containers().stream()).distinct().toList(),
+                    java.util.stream.Stream.concat(first.migrations().stream(), second.migrations().stream()).distinct().toList()));
+        }
+        return List.copyOf(merged.values());
     }
 
     private static void validateIdentities(List<Session> sessions, List<Diagnostic> diagnostics) {
@@ -109,18 +162,27 @@ final class RepresentationBatch {
             var first = owners.getFirst().analysis.rules().get(entry.getKey());
             if (owners.stream().allMatch(session -> compatible(first, session.analysis.rules().get(entry.getKey())))) continue;
             var location = entry.getKey().location();
-            List<MigrationRequirement> requirements = owners.stream().flatMap(session -> session.requirements().stream()).toList();
-            List<ContainerContext> containers = new ArrayList<>();
+            ProgramPoint point = owners.getFirst().analysis.points().get(location);
+            if (point == null) point = new ProgramPoint(location.method(), location.instruction(), first.helper().toString());
+            ProgramPoint usePoint = point;
+            List<MigrationRequirement> requirements = owners.stream().map(session -> session.requirement(usePoint, entry.getKey())).toList();
             for (var storage : facts.storages.entrySet()) {
-                if (storage.getValue().requirements().containsAll(requirements)) {
+                if (owners.stream().anyMatch(session -> session.analysis.graph().storages(List.of(session.subject(usePoint, entry.getKey())))
+                        .contains(storage.getKey()))) {
                     storage.getValue().conflict();
-                    containers.add(context(storage.getKey(), sessions));
                 }
             }
-            var value = facts.values.get(location);
-            if (value != null) value.conflict();
+            List<ContainerContext> containers = owners.stream()
+                    .flatMap(session -> session.solver.contextsAt(usePoint, entry.getKey(), facts).stream()).distinct().toList();
+            for (Session owner : owners) {
+                for (var subject : owner.analysis.graph().ancestors(List.of(owner.subject(usePoint, entry.getKey())))) {
+                    if (subject.kind() != ConstraintGraph.Kind.VALUE) continue;
+                    var value = facts.values.get(new RepresentationPlan.Location(subject.location().method(), subject.location().instruction()));
+                    if (value != null) value.conflict();
+                }
+            }
             diagnostics.add(conflict("REPRESENTATION_RULE_CONFLICT", new ProgramPoint(location.method(), location.instruction(),
-                    first.helper().toString()), entry.getKey().parameter(), requirements,
+                    usePoint.symbol()), entry.getKey().parameter(), requirements,
                     "Incompatible " + entry.getKey().kind() + " rules at one use parameter=" + entry.getKey().parameter())
                     .withContainers(containers));
         }

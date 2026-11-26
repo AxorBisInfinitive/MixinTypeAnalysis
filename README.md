@@ -104,6 +104,10 @@ public class ExampleMixin {
 
 兼容动作在固定 Mixin 后快照上合并，每条指令只执行一次最终改写。同一调用上的全部参数一起分配临时槽并应用编码及 primitive 转换，独立通道的泛型调试信息共同更新。来源、读取与编码继续遵守各声明的规则作用域。未选中迁移的已知存储通道保持原表示，缺少来源或规则的要求保持未解决状态。四态汇总为 `UNKNOWN`、`ORIGINAL`、`MIGRATED` 和 `CONFLICT`。
 
+各声明先求解需求固定点，批次汇总全部值与通道后校验实际使用，最后生成统一计划。共享 Long、共享 long 分别装箱，以及容器之间转移元素可以跨声明协作。编码边界依据完整批次判定。容器比较的存储元素编码和查询参数编码分别保留各自规则，再合并到同一次调用。
+
+`ConstraintGraph` 区分值、调用参数与完整 StorageSlot，并保存每项要求的推导关联。元素状态按实际关联约束计算，诊断只折叠具有共同推导依据的冲突。确定为 null 的来源可用于不同引用表示，普通引用使用与实际读取的空值异常继续保留。包含非 null 来源的合流继续检查各来源要求。
+
 核心 API 接收一个 ClassLoader 对应的固定类集合，Map 的键使用 JVM 内部类名。调用方负责提供完整的参与类集合。
 
 ```java
@@ -148,6 +152,8 @@ Map<String, byte[]> transformedClasses = plan.apply();
 诊断消息默认按未解决约束分组，包含目标迁移、调用位置、规则要求和一条依赖路径。分析失败的最后一行固定为 `Analysis failed. No transformations published.`。设置系统属性 `-Dmixinta.diagnostics=verbose`，或调用 `format(DiagnosticVerbosity.VERBOSE)`，可追加完整描述符、迁移身份、候选规则和全部传播边。
 
 容器诊断通过 `ContainerContext` 保存根分配、通道、真实访问位置、operation 和元素事实状态。跨声明诊断通过 `MigrationRequirement` 保存冲突双方及各自推导。普通输出显示 `Storage`、`Channel`、`Operation`、`State` 和各声明的依赖路径，verbose 追加完整分配描述符、访问位置和传播边。表示与规则冲突在 `analyze` 阶段汇总，计划动作冲突使用 `REPRESENTATION_PLAN_CONFLICT`，输出验证继续检查实际生成的字节码。
+
+缺失规则和外部访问也保留相关声明。相同位置及相同表示要求的重复约束共同展示，独立值和容器的冲突分别报告。未知操作定位实际访问，普通路径由真实传播边重建，verbose 补充相关调用图及视图关系。
 
 栈帧所需的层次信息先从输入类读取，再通过资源 ClassLoader 读取外部 class 文件。计算过程中避免定义或初始化被分析的类，缺少层次信息时报告错误。
 

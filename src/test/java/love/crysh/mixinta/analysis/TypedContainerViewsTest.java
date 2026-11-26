@@ -324,6 +324,11 @@ class TypedContainerViewsTest {
         var fixture = fixture("java.util.Map<Long, Long> q = new java.util.HashMap<>(); q.put(position(12).asLong(), 7L); return lookup(q.keySet().iterator().next());");
         var failure = assertThrows(TypedOverwriteException.class, fixture::transform);
         assertTrue(failure.diagnostics().stream().anyMatch(diagnostic -> diagnostic.code().equals("MAP_KEY_MIGRATION_NOT_IMPLEMENTED")));
+        var diagnostic = failure.diagnostics().stream().filter(value -> value.code().equals("MAP_KEY_MIGRATION_NOT_IMPLEMENTED"))
+                .findFirst().orElseThrow();
+        assertEquals(1, diagnostic.containers().size());
+        assertEquals(0, diagnostic.containers().getFirst().channel());
+        assertEquals("UNKNOWN", diagnostic.containers().getFirst().state().name());
     }
 
     @Test

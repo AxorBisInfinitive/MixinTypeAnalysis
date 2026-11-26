@@ -31,7 +31,7 @@ class TypedBatchRepresentationTest {
         return fixture(body, secondType, secondRules, reverse, Map.of(), "", "");
     }
 
-    private static BytecodeFixtures.Fixture fixture(String body, String secondType, String secondRules, boolean reverse,
+    static BytecodeFixtures.Fixture fixture(String body, String secondType, String secondRules, boolean reverse,
             Map<String, String> additional, String contracts, String members) {
         String rules = """
                 package sample;
@@ -166,6 +166,8 @@ class TypedBatchRepresentationTest {
         var failure = assertThrows(TypedOverwriteException.class,
                 () -> prepared.analyze(BytecodeFixtures.mergeForCoreTest(fixture, prepared)));
         assertTrue(failure.diagnostics().stream().anyMatch(value -> value.code().equals("VALUE_FACT_CONFLICT")));
+        assertTrue(failure.diagnostics().stream().filter(value -> value.code().equals("VALUE_FACT_CONFLICT"))
+                .anyMatch(value -> value.failureSymbol().contains("asLong")));
     }
 
     @Test

@@ -123,8 +123,11 @@ final class DiagnosticFormatter {
             output.append(System.lineSeparator()).append("    Migration: ").append(migration.id())
                     .append(" -> ").append(displayType(migration.representation(), verbosity)).append(System.lineSeparator());
             if (!migration.dependencies().isEmpty()) {
-                output.append("    Dependency:").append(System.lineSeparator());
-                appendPath(output, migrationPath(diagnostic, migration), verbosity);
+                List<DependencyStep> path = migrationPath(diagnostic, migration);
+                if (!path.isEmpty()) {
+                    output.append("    Dependency:").append(System.lineSeparator());
+                    appendPath(output, path, verbosity);
+                } else output.append("    Dependency path unavailable.").append(System.lineSeparator());
                 if (verbosity == DiagnosticVerbosity.VERBOSE) {
                     for (PropagationEdge edge : migration.dependencies()) {
                         output.append("    Edge: ").append(displayPoint(edge.fromPoint(), verbosity)).append(" -> ")
@@ -138,7 +141,7 @@ final class DiagnosticFormatter {
         if (path.isEmpty() && !diagnostic.propagation().isEmpty()) {
             path = fallbackPath(diagnostic.propagation());
         }
-        if (!path.isEmpty()) {
+        if (!path.isEmpty() && diagnostic.migrations().isEmpty()) {
             output.append(System.lineSeparator()).append("    Dependency:").append(System.lineSeparator());
             appendPath(output, path, verbosity);
         }
@@ -170,9 +173,11 @@ final class DiagnosticFormatter {
     }
 
     private static List<DependencyStep> migrationPath(Diagnostic diagnostic, MigrationRequirement requirement) {
-        List<ProgramPoint> goals = diagnostic.containers().stream().map(ContainerContext::storage).toList();
-        if (goals.isEmpty() && diagnostic.method() != null) {
-            goals = List.of(new ProgramPoint(diagnostic.method(), diagnostic.instruction(), diagnostic.failureSymbol()));
+        List<ProgramPoint> goals = diagnostic.containers().stream().map(context -> new ProgramPoint(context.storage().method(),
+                context.storage().instruction(), context.storage().symbol(), "channel=" + context.channel())).toList();
+        if (!diagnostic.code().equals("CONTAINER_FACT_CONFLICT") && diagnostic.method() != null) {
+            goals = List.of(new ProgramPoint(diagnostic.method(), diagnostic.instruction(), diagnostic.failureSymbol(),
+                    diagnostic.parameter() < 0 ? "" : "parameter=" + diagnostic.parameter()));
         }
         List<ProgramPoint> destinations = goals;
         var roots = requirement.dependencies().stream()
@@ -184,7 +189,7 @@ final class DiagnosticFormatter {
         while (!pending.isEmpty()) {
             ProgramPoint point = pending.removeFirst();
             if (destinations.stream().anyMatch(goal -> java.util.Objects.equals(goal.method(), point.method())
-                    && goal.instruction() == point.instruction())) {
+                    && goal.instruction() == point.instruction() && (goal.detail().isEmpty() || goal.detail().equals(point.detail())))) {
                 List<DependencyStep> path = new ArrayList<>();
                 for (ProgramPoint current = point; current != null; current = parents.get(current)) path.add(step(current));
                 return List.copyOf(path);
@@ -197,16 +202,13 @@ final class DiagnosticFormatter {
                         }
                     });
         }
-        return fallbackPath(requirement.dependencies());
+        return List.of();
     }
 
     private static List<DependencyStep> fallbackPath(List<PropagationEdge> edges) {
-        List<DependencyStep> path = new ArrayList<>();
-        for (PropagationEdge edge : edges) {
-            path.add(step(edge.fromPoint()));
-            path.add(step(edge.toPoint()));
-        }
-        return path.stream().distinct().toList();
+        return edges.stream().sorted(Comparator.comparing((PropagationEdge edge) -> edge.fromPoint().key())
+                .thenComparing(edge -> edge.toPoint().key())).findFirst()
+                .map(edge -> List.of(step(edge.toPoint()), step(edge.fromPoint()))).orElse(List.of());
     }
 
     private static DependencyStep step(ProgramPoint point) {

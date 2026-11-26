@@ -45,7 +45,9 @@ import java.util.Set;
 final class RepresentationSolver {
     record Analysis(RepresentationPlan plan, Set<RepresentationPlan.Location> values,
             Set<StorageSlot> storages, Map<RuleUse, RepresentationMigration.Rule> rules,
-            List<PropagationEdge> dependencies, List<ContainerContext> containers) {
+            List<PropagationEdge> dependencies, List<ContainerContext> containers, ConstraintGraph graph,
+            Map<RepresentationPlan.Location, ProgramPoint> points, Set<RepresentationPlan.Location> nulls,
+            Set<RepresentationPlan.Location> unresolvedValues, Set<StorageSlot> unresolvedStorages) {
     }
 
     record RuleUse(RepresentationPlan.Location location, TypeRule.Kind kind, int parameter) {
@@ -105,6 +107,8 @@ final class RepresentationSolver {
     private final Set<AbstractInsnNode> requested = new HashSet<>();
     private final List<Diagnostic> diagnostics;
     private final List<Issue> issues = new ArrayList<>();
+    private final ConstraintGraph graph = new ConstraintGraph();
+    private ElementFacts batch;
     private final Set<String> diagnosticKeys = new HashSet<>();
     private final Set<PropagationEdge> dependencies = new LinkedHashSet<>();
     private final Map<AbstractInsnNode, RepresentationMigration.Rule> selected = new IdentityHashMap<>();
@@ -116,7 +120,7 @@ final class RepresentationSolver {
     private final Map<MethodKey, RepresentationPlan.Bridge> bridges = new LinkedHashMap<>();
     private final Type representation;
 
-    private record Issue(String code, Site site, int parameter, String message, List<String> candidates) {
+    private record Issue(String code, Site site, int parameter, String message, List<String> candidates, Set<StorageSlot> storages) {
     }
 
     RepresentationSolver(Map<String, ClassNode> classes, List<RepresentationMigration> migrations,
@@ -166,24 +170,36 @@ final class RepresentationSolver {
         return callGraph == null ? null : new Input(flows, methodSummaries, callGraph);
     }
 
-    Analysis finish() {
+    void validate(ElementFacts facts) {
+        batch = facts;
         if (callGraph != null) {
             validateUses();
             validateContainerEffects();
         }
-        finishDiagnostics();
-        if (issues.isEmpty()) {
-            for (MethodFlow flow : flows) {
-                plan(flow);
-            }
-        }
+    }
+
+    Analysis plan() {
+        if (issues.isEmpty()) flows.forEach(this::plan);
         return result();
     }
 
-    private Analysis result() {
+    Analysis result() {
+        Set<StorageSlot> unresolvedStorages = new LinkedHashSet<>();
+        Set<RepresentationPlan.Location> unresolvedValues = new LinkedHashSet<>();
+        for (Issue issue : issues) {
+            unresolvedStorages.addAll(relatedStorages(issue));
+            graph.ancestors(subjects(issue)).stream().filter(subject -> subject.kind() == ConstraintGraph.Kind.VALUE)
+                    .forEach(subject -> unresolvedValues.add(new RepresentationPlan.Location(subject.location().method(), subject.location().instruction())));
+        }
+        Map<RepresentationPlan.Location, ProgramPoint> points = new LinkedHashMap<>();
+        sites.values().forEach(site -> points.put(location(site), site.point()));
+        Set<RepresentationPlan.Location> values = requested.stream().map(origin -> location(sites.get(origin)))
+                .collect(java.util.stream.Collectors.toSet());
+        Set<RepresentationPlan.Location> nulls = requested.stream().filter(origin -> origin.getOpcode() == Opcodes.ACONST_NULL)
+                .map(origin -> location(sites.get(origin))).collect(java.util.stream.Collectors.toSet());
         return new Analysis(new RepresentationPlan(edits, arguments, locals, List.copyOf(bridges.values()), changes, orderedEdges(dependencies)),
-                requested.stream().map(origin -> location(sites.get(origin))).collect(java.util.stream.Collectors.toSet()),
-                Set.copyOf(storages), Map.copyOf(rules), orderedEdges(dependencies), containerContexts());
+                Set.copyOf(values), Set.copyOf(storages), Map.copyOf(rules), orderedEdges(dependencies), containerContexts(),
+                graph, Map.copyOf(points), nulls, Set.copyOf(unresolvedValues), Set.copyOf(unresolvedStorages));
     }
 
     private List<ContainerContext> containerContexts() {
@@ -191,13 +207,31 @@ final class RepresentationSolver {
         for (ContainerUse use : containerUses) {
             if (use.summary() == null) continue;
             for (StorageSlot slot : use.receivers().slots(use.summary().channel())) {
-                ElementState state = !storages.contains(slot) ? ElementState.ORIGINAL
-                        : issues.isEmpty() ? ElementState.MIGRATED : ElementState.UNKNOWN;
-                contexts.add(new ContainerContext(storagePoint(slot.storage()), slot.storage().descriptor(),
-                        slot.channel(), use.site().point(), use.summary().operation().name(), state));
+                contexts.add(context(slot, use.site(), use.summary().operation().name()));
             }
         }
         return contexts.stream().distinct().toList();
+    }
+
+    private ContainerContext context(StorageSlot slot, Site access, String operation) {
+        ElementFacts.Fact fact = batch == null ? null : batch.storages.get(slot);
+        ElementState state = fact == null ? ElementState.ORIGINAL : fact.state();
+        return new ContainerContext(storagePoint(slot.storage()), slot.storage().descriptor(), slot.channel(), access.point(), operation, state);
+    }
+
+    private Set<ConstraintGraph.Subject> subjects(Issue issue) {
+        if (issue.code().contains("PRODUCER") || issue.code().contains("SOURCE")
+                || issue.parameter() < 0 && issue.site().index >= 0 && requested.contains(issue.site().flow.instructions[issue.site().index])) {
+            return Set.of(ConstraintGraph.value(issue.site().point()));
+        }
+        return Set.of(ConstraintGraph.use(issue.site().point(), issue.parameter()));
+    }
+
+    private Set<StorageSlot> relatedStorages(Issue issue) {
+        Set<StorageSlot> related = new LinkedHashSet<>(issue.storages());
+        related.addAll(graph.storages(subjects(issue)));
+        related.retainAll(storages);
+        return related;
     }
 
     private void analyzeMethods() {
@@ -269,6 +303,10 @@ final class RepresentationSolver {
             DependencyKind kind = access.kind().escape == ContainerEffects.EscapeState.ESCAPED
                     ? DependencyKind.CONTAINER_ESCAPE : DependencyKind.CONTAINER_EXTERNAL_ACCESS;
             List<String> details = new ArrayList<>();
+            for (StorageSlot slot : storages) {
+                if (affected.contains(slot.storage())) graph.link(ConstraintGraph.storage(slot),
+                        ConstraintGraph.use(access.point(), access.parameter()), kind);
+            }
             for (StorageId storage : affected) {
                 dependencies.add(new PropagationEdge(storagePoint(storage), access.point(), kind));
                 List<Integer> channels = storages.stream().filter(slot -> slot.storage().equals(storage))
@@ -280,7 +318,8 @@ final class RepresentationSolver {
                     : access.kind() == ContainerEffects.Kind.UNKNOWN_OPERATION ? "receiver" : "value";
             candidateProblem(access.kind().code(), site(access.point()), access.parameter(),
                     access.kind() + " " + binding + " requires modeled container effects, storage=" + String.join(", ", details),
-                    summaryCandidates(site(access.point())));
+                    summaryCandidates(site(access.point())), storages.stream().filter(slot -> affected.contains(slot.storage()))
+                            .collect(java.util.stream.Collectors.toSet()));
         }
     }
 
@@ -322,11 +361,17 @@ final class RepresentationSolver {
     }
 
     private void request(SourceValue value, ProgramPoint parent, DependencyKind kind) {
+        ConstraintGraph.Subject subject = kind == DependencyKind.TARGET_ARGUMENT
+                ? ConstraintGraph.use(parent, Integer.parseInt(parent.detail().substring("parameter=".length()))) : ConstraintGraph.value(parent);
+        request(value, subject, kind);
+    }
+
+    private void request(SourceValue value, ConstraintGraph.Subject parent, DependencyKind kind) {
         for (AbstractInsnNode origin : ordered(value.insns)) {
-            dependencies.add(new PropagationEdge(parent, sites.get(origin).point(), kind));
-            if (requested.add(origin)) {
-                pending.add(new Demand(origin, parent));
-            }
+            ProgramPoint point = sites.get(origin).point();
+            dependencies.add(new PropagationEdge(parent.point(), point, kind));
+            graph.link(parent, ConstraintGraph.value(point), kind);
+            if (requested.add(origin)) pending.add(new Demand(origin, parent.point()));
         }
     }
 
@@ -373,12 +418,12 @@ final class RepresentationSolver {
 
     private void requireStorage(StorageReferences references, ProgramPoint path, int channel) {
         for (StorageSlot slot : references.slots(channel)) {
+            storages.add(slot);
+            graph.link(ConstraintGraph.value(path), ConstraintGraph.storage(slot), DependencyKind.CONTAINER_ALLOCATION);
+            dependencies.add(new PropagationEdge(path, storagePoint(slot.storage()), DependencyKind.CONTAINER_ALLOCATION));
             if (slot.channel() == 0 && ContainerSummary.mapOwner(Type.getType(slot.storage().descriptor()).getInternalName())) {
                 problem("MAP_KEY_MIGRATION_NOT_IMPLEMENTED", site(path), "Map key representation requires equality and hash rules");
-                continue;
             }
-            storages.add(slot);
-            dependencies.add(new PropagationEdge(path, storagePoint(slot.storage()), DependencyKind.CONTAINER_ALLOCATION));
         }
         for (ProgramPoint origin : references.unknownOrigins()) {
             Site site = site(origin);
@@ -407,13 +452,26 @@ final class RepresentationSolver {
                 }
             }
             if (summary.writesElement()) {
-                request(site.flow.argument(site.index, use.call(), summary.elementParameter()), site.point(),
-                        DependencyKind.CONTAINER_WRITE);
+                var write = ConstraintGraph.use(site.point(), summary.elementParameter());
+                for (StorageSlot slot : receiver.slots(summary.channel())) {
+                    if (storages.contains(slot)) graph.link(ConstraintGraph.storage(slot), write, DependencyKind.CONTAINER_WRITE);
+                }
+                request(site.flow.argument(site.index, use.call(), summary.elementParameter()), write, DependencyKind.CONTAINER_WRITE);
             }
             if (summary.readsElement()) {
+                for (StorageSlot slot : receiver.slots(summary.channel())) {
+                    if (storages.contains(slot)) graph.link(ConstraintGraph.storage(slot), ConstraintGraph.value(site.point()), DependencyKind.CONTAINER_READ);
+                }
                 request(new SourceValue(1, use.call()), site.point(), DependencyKind.CONTAINER_READ);
             }
             if (summary.observedParameter() >= 0) {
+                for (StorageSlot slot : receiver.slots(summary.channel())) {
+                    if (storages.contains(slot)) {
+                        var observation = ConstraintGraph.use(site.point(), -1);
+                        graph.link(ConstraintGraph.storage(slot), observation, DependencyKind.CONTAINER_OBSERVE);
+                        graph.link(observation, ConstraintGraph.storage(slot), DependencyKind.CONTAINER_OBSERVE);
+                    }
+                }
                 helper(TypeRule.Kind.ENCODE, site);
             }
         }
@@ -469,7 +527,7 @@ final class RepresentationSolver {
                     Frame<SourceValue> frame = flow.frames[index];
                     for (int parameter = 0; parameter < arguments; parameter++) {
                         SourceValue value = frame.getStack(frame.getStackSize() - arguments + parameter);
-                        if (touches(value, migrated)) {
+                        if (touches(value, migrated) && !nullOnly(value)) {
                             problem("UNSUPPORTED_VALUE_USE", site, pathFor(value) + " <- invokedynamic argument at " + site.describe());
                         }
                     }
@@ -477,7 +535,7 @@ final class RepresentationSolver {
                     checkReference(constant.cst, site);
                 } else if (instruction.getOpcode() == Opcodes.ARETURN || instruction.getOpcode() == Opcodes.PUTSTATIC
                         || instruction.getOpcode() == Opcodes.PUTFIELD || instruction.getOpcode() == Opcodes.AASTORE) {
-                    if (touches(flow.top(index), migrated)) {
+                    if (touches(flow.top(index), migrated) && !nullOnly(flow.top(index))) {
                         problem("UNSUPPORTED_REFERENCE_USE", site, pathFor(flow.top(index)) + " <- reference sink at " + site.describe());
                     }
                 } else if (instruction.getOpcode() == Opcodes.LRETURN && touches(flow.top(index), migrated)) {
@@ -486,7 +544,8 @@ final class RepresentationSolver {
                         && instruction.getOpcode() != Opcodes.POP
                         && !(instruction instanceof TypeInsnNode cast && cast.getOpcode() == Opcodes.CHECKCAST
                         && cast.desc.equals("java/lang/Long"))
-                        && flow.consumed.getOrDefault(instruction, Set.of()).stream().anyMatch(migrated::contains)) {
+                        && flow.consumed.getOrDefault(instruction, Set.of()).stream()
+                                .anyMatch(origin -> origin.getOpcode() != Opcodes.ACONST_NULL && migrated.contains(origin))) {
                     problem("UNSUPPORTED_VALUE_USE", site, "Migrated value reaches opcode=" + instruction.getOpcode());
                 }
             }
@@ -508,10 +567,12 @@ final class RepresentationSolver {
         MethodFlow flow = site.flow;
         int index = site.index;
         boolean receiverPresent = call.getOpcode() != Opcodes.INVOKESTATIC;
+        if (receiverPresent) linkUse(site, -1, flow.receiver(index, call));
         if (isUnbox(call) && migrated.contains(call)) {
             helper(TypeRule.Kind.READ, site);
         }
         if (receiverPresent && touches(flow.receiver(index, call), migrated)
+                && !nullOnly(flow.receiver(index, call))
                 && !(isUnbox(call) && migrated.contains(call))) {
             problem("UNSUPPORTED_REFERENCE_USE", site, pathFor(flow.receiver(index, call)) + " <- receiver of " + symbol(call));
         }
@@ -524,21 +585,52 @@ final class RepresentationSolver {
         for (int parameter = 0; parameter < arguments.length; parameter++) {
             int parameterIndex = parameter;
             SourceValue value = flow.argument(index, call, parameter);
+            linkUse(site, parameter, value);
             if (!touches(value, migrated)) {
                 continue;
             }
+            if (nullOnly(value) && (arguments[parameter].getSort() == Type.OBJECT || arguments[parameter].getSort() == Type.ARRAY)) continue;
             Migration target = target(call);
             boolean matchingTarget = target != null && target.representations().stream().anyMatch(declaration ->
                     declaration.target().equals(target.original()) && declaration.parameter() == parameterIndex);
-            if (matchingTarget || isBox(call) && migrated.contains(call)
-                    || isContainerWrite(site, call, parameter) && touchesChannel(flow.receiverReferences(index, call), summary(site, call).channel())) {
+            if (matchingTarget || isBox(call) && effectiveValue(call)
+                    || compatibleWrite(site, call, parameter)) {
                 continue;
             }
             if (arguments[parameter].equals(Type.LONG_TYPE) || isMapComparison(site, call, parameter)) {
                 helper(TypeRule.Kind.ENCODE, site, parameter);
             } else {
-                problem("UNSUPPORTED_REFERENCE_USE", site, pathFor(value) + " <- argument of " + symbol(call));
+                candidateProblem("UNSUPPORTED_REFERENCE_USE", site, parameter, pathFor(value) + " <- argument of " + symbol(call), List.of());
             }
+        }
+    }
+
+    private boolean effectiveValue(AbstractInsnNode instruction) {
+        return migrated.contains(instruction) || batch != null && batch.value(location(sites.get(instruction)), representation);
+    }
+
+    private boolean compatibleWrite(Site site, MethodInsnNode call, int parameter) {
+        if (!isContainerWrite(site, call, parameter)) return false;
+        SourceValue value = site.flow.argument(site.index, call, parameter);
+        if (nullOnly(value)) return true;
+        var summary = summary(site, call);
+        var references = site.flow.receiverReferences(site.index, call);
+        var slots = references.slots(summary.channel());
+        return !slots.isEmpty() && references.unknownOrigins().isEmpty() && slots.stream()
+                .allMatch(slot -> storages.contains(slot) || batch != null && batch.storage(slot, representation));
+    }
+
+    private static boolean nullOnly(SourceValue value) {
+        return value != null && !value.insns.isEmpty() && value.insns.stream().allMatch(origin -> origin.getOpcode() == Opcodes.ACONST_NULL);
+    }
+
+    private void linkUse(Site site, int parameter, SourceValue value) {
+        if (value == null) return;
+        for (AbstractInsnNode origin : ordered(value.insns)) {
+            var use = ConstraintGraph.use(site.point(), parameter);
+            var producer = ConstraintGraph.value(sites.get(origin).point());
+            graph.link(use, producer, DependencyKind.SOURCE_RESULT);
+            if (migrated.contains(origin)) graph.link(producer, use, DependencyKind.SOURCE_RESULT);
         }
     }
 
@@ -547,25 +639,33 @@ final class RepresentationSolver {
     }
 
     private RepresentationMigration.Rule helper(TypeRule.Kind kind, Site site, int parameter) {
+        if (kind == TypeRule.Kind.READ) graph.link(ConstraintGraph.use(site.point(), parameter), ConstraintGraph.value(site.point()), DependencyKind.UNBOXING);
+        else if (site.index >= 0 && site.flow.instructions[site.index] instanceof MethodInsnNode call && parameter >= 0) {
+            linkUse(site, parameter, site.flow.argument(site.index, call, parameter));
+        } else if (site.index >= 0) linkUse(site, parameter, site.flow.top(site.index));
         List<RepresentationMigration.Rule> candidates = migration.rules().stream().filter(rule -> rule.kind() == kind).toList();
         if (candidates.size() != 1) {
-            candidateProblem(candidates.isEmpty() ? "MISSING_" + kind + "_RULE" : "AMBIGUOUS_" + kind + "_RULE", site,
+            candidateProblem(candidates.isEmpty() ? "MISSING_" + kind + "_RULE" : "AMBIGUOUS_" + kind + "_RULE", site, parameter,
                     "Expected one " + kind + " helper", candidates.stream().map(rule -> rule.id() + " applicable").toList());
             return null;
         }
-        checkHelperAccess(candidates.getFirst().helper(), site);
+        checkHelperAccess(candidates.getFirst().helper(), site, parameter);
         rules.put(new RuleUse(location(site), kind, parameter), candidates.getFirst());
         return candidates.getFirst();
     }
 
     private void checkHelperAccess(MethodKey helper, Site site) {
+        checkHelperAccess(helper, site, -1);
+    }
+
+    private void checkHelperAccess(MethodKey helper, Site site, int parameter) {
         ClassNode owner = classes.get(helper.owner());
         if ((owner.access & Opcodes.ACC_PUBLIC) == 0 && !packageName(owner.name).equals(packageName(site.method().owner()))) {
-            problem("RULE_HELPER_NOT_ACCESSIBLE", site, "Rule helper owner is inaccessible from " + site.method() + ": " + helper);
+            candidateProblem("RULE_HELPER_NOT_ACCESSIBLE", site, parameter, "Rule helper owner is inaccessible from " + site.method() + ": " + helper, List.of());
         }
         ClassNode type = hierarchy.get(representation.getInternalName());
         if ((type.access & Opcodes.ACC_PUBLIC) == 0 && !packageName(type.name).equals(packageName(site.method().owner()))) {
-            problem("REPRESENTATION_TYPE_NOT_ACCESSIBLE", site, "Representation type is inaccessible from " + site.method() + ": " + type.name);
+            candidateProblem("REPRESENTATION_TYPE_NOT_ACCESSIBLE", site, parameter, "Representation type is inaccessible from " + site.method() + ": " + type.name, List.of());
         }
     }
 
@@ -592,21 +692,28 @@ final class RepresentationSolver {
                 }
             } else if (instruction instanceof TypeInsnNode cast && cast.getOpcode() == Opcodes.CHECKCAST
                     && cast.desc.equals("java/lang/Long") && touches(flow.top(index), migrated)) {
-                edit(site, "cast-reference", null);
+                if (!nullOnly(flow.top(index))) edit(site, "cast-reference", null);
             } else if (instruction instanceof MethodInsnNode call) {
                 if (selected.containsKey(call)) {
                     edit(site, "replace-producer", selected.get(call));
-                } else if (isBox(call) && migrated.contains(call)) {
-                    edit(site, "remove-boxing", null);
+                } else if (isBox(call) && effectiveValue(call)) {
+                    if (migrated.contains(call)) edit(site, "remove-boxing", null);
                 } else if (isUnbox(call) && migrated.contains(call)) {
                     edit(site, "replace-unboxing", helper(TypeRule.Kind.READ, site));
                 } else if (isMigratedObservation(flow, index, call)) {
                     var encoder = helper(TypeRule.Kind.ENCODE, site);
                     String action = ContainerSummary.mapOwner(call.owner) ? "observe-map-values" : "observe-view-elements";
                     edits.add(new RepresentationPlan.Edit(location(site), action, accessibleHelper(encoder.helper(), site),
-                            representation, TypeRule.Binding.RECEIVER,
-                            touches(flow.argument(index, call, 0), migrated) ? 1 : 0));
+                            representation, TypeRule.Binding.RECEIVER, 0));
                     changes.add(new PlanChange(flow.key, index, action, migration.id(), encoder.id()));
+                    int parameter = summary(site, call).observedParameter();
+                    var value = flow.argument(index, call, parameter);
+                    if (touches(value, migrated) && !nullOnly(value)) {
+                        var queryEncoder = helper(TypeRule.Kind.ENCODE, site, parameter);
+                        arguments.add(new RepresentationPlan.Argument(location(site), symbol(call), symbol(call), parameter,
+                                representation, accessibleHelper(queryEncoder.helper(), site), migration.id()));
+                        changes.add(new PlanChange(flow.key, index, "encode-argument", migration.id(), queryEncoder.id()));
+                    }
                 } else {
                     Type[] parameters = Type.getArgumentTypes(call.desc);
                     Migration target = target(call);
@@ -619,7 +726,9 @@ final class RepresentationSolver {
                         if (!touches(flow.argument(index, call, parameter), migrated) && !ownTarget) {
                             continue;
                         }
-                        if (isContainerWrite(site, call, parameter) && touchesChannel(flow.receiverReferences(index, call), summary(site, call).channel())) {
+                        if (nullOnly(flow.argument(index, call, parameter))
+                                && (parameters[parameter].getSort() == Type.OBJECT || parameters[parameter].getSort() == Type.ARRAY)) continue;
+                        if (compatibleWrite(site, call, parameter)) {
                             continue;
                         }
                         var encoder = matchingTarget ? null : helper(TypeRule.Kind.ENCODE, site, parameter);
@@ -679,6 +788,7 @@ final class RepresentationSolver {
                 }
                 SourceValue value = frame.getLocal(variable.index);
                 if ((variable.desc.equals("J") || variable.desc.equals("Ljava/lang/Long;")) && touches(value, migrated)) {
+                    if (nullOnly(value)) continue;
                     locals.add(new RepresentationPlan.Local(flow.key, local, representation.getDescriptor(), null));
                     break;
                 }
@@ -860,40 +970,81 @@ final class RepresentationSolver {
     }
 
     private void candidateProblem(String code, Site site, int parameter, String message, List<String> candidates) {
+        candidateProblem(code, site, parameter, message, candidates, Set.of());
+    }
+
+    private void candidateProblem(String code, Site site, int parameter, String message, List<String> candidates, Set<StorageSlot> slots) {
+        var use = ConstraintGraph.use(site.point(), parameter);
+        if (site.index >= 0 && !graph.contains(use)) {
+            for (AbstractInsnNode origin : site.flow.consumed.getOrDefault(site.flow.instructions[site.index], Set.of())) {
+                if (migrated.contains(origin)) graph.link(use, ConstraintGraph.value(sites.get(origin).point()), DependencyKind.SOURCE_RESULT);
+            }
+        }
         String key = code + " " + site.describe() + " parameter=" + parameter;
         if (diagnosticKeys.add(key)) {
-            issues.add(new Issue(code, site, parameter, message, candidates));
+            issues.add(new Issue(code, site, parameter, message, candidates, Set.copyOf(slots)));
         }
     }
 
-    private void finishDiagnostics() {
+    List<Diagnostic> diagnostics(ElementFacts facts) {
+        batch = facts;
+        List<Diagnostic> result = new ArrayList<>(diagnostics);
         for (Issue issue : issues) {
-            Set<ProgramPoint> affected = new HashSet<>();
-            affected.add(issue.site.point());
-            boolean changed;
-            do {
-                changed = false;
-                for (PropagationEdge edge : dependencies) {
-                    if (affected.contains(edge.toPoint())) {
-                        changed |= affected.add(edge.fromPoint());
-                    }
-                }
-            } while (changed);
-            List<PropagationEdge> relevant = orderedEdges(dependencies.stream()
-                    .filter(edge -> affected.contains(edge.toPoint()) && affected.contains(edge.fromPoint())).toList());
+            Set<ConstraintGraph.Subject> anchors = subjects(issue);
+            List<PropagationEdge> relevant = graph.evidence(anchors);
             Type originalType = Type.getArgumentTypes(migration.target().descriptor())[migration.parameter()];
-            RuleRequirement requirement = requirement(issue.code);
-            String sourceType = originalType.getDescriptor();
-            String targetType = migration.representation().getDescriptor();
+            var requirement = new love.crysh.mixinta.diagnostic.MigrationRequirement(migration.id(), migration.target(), migration.parameter(),
+                    representation.getDescriptor(), relevant);
             Diagnostic diagnostic = new Diagnostic(issue.code, issue.site.method(), Math.max(-1, issue.site.index), issue.parameter,
-                    issue.message, migration.id(), relevant, issue.candidates,
-                    migration.target(), migration.parameter(), sourceType, targetType, requirement,
+                    issue.message, migration.id(), orderedEdges(java.util.stream.Stream.concat(relevant.stream(), referenceEvidence(relatedStorages(issue)).stream()).toList()), issue.candidates,
+                    migration.target(), migration.parameter(), originalType.getDescriptor(), representation.getDescriptor(), requirement(issue.code),
                     dependencyPath(issue.site.point(), relevant), issue.site.symbol());
-            List<ContainerContext> contexts = containerContexts().stream()
-                    .filter(context -> affected.contains(context.storage()) || context.access().equals(issue.site.point()))
-                    .toList();
-            diagnostics.add(diagnostic.withContainers(contexts));
+            result.add(diagnostic.withContainers(contextsAt(issue.site.point(), issue.parameter(), relatedStorages(issue), issue.code()))
+                    .withMigrations(List.of(requirement)));
         }
+        return List.copyOf(result);
+    }
+
+    private List<PropagationEdge> referenceEvidence(Set<StorageSlot> slots) {
+        Set<ProgramPoint> affected = slots.stream().map(slot -> storagePoint(slot.storage()))
+                .collect(java.util.stream.Collectors.toCollection(LinkedHashSet::new));
+        List<PropagationEdge> references = dependencies.stream().filter(edge -> edge.kind() == DependencyKind.CONTAINER_CALL_ARGUMENT
+                || edge.kind() == DependencyKind.CONTAINER_RETURN || edge.kind() == DependencyKind.CONTAINER_VIEW).toList();
+        boolean changed;
+        do {
+            changed = false;
+            for (PropagationEdge edge : references) if (affected.contains(edge.toPoint())) changed |= affected.add(edge.fromPoint());
+        } while (changed);
+        return references.stream().filter(edge -> affected.contains(edge.fromPoint()) && affected.contains(edge.toPoint())).toList();
+    }
+
+    List<ContainerContext> contextsAt(ProgramPoint point, RuleUse use, ElementFacts facts) {
+        batch = facts;
+        var subject = use.kind() == TypeRule.Kind.SOURCE ? ConstraintGraph.value(point) : ConstraintGraph.use(point, use.parameter());
+        return contextsAt(point, use.parameter(), graph.storages(List.of(subject)), use.kind() == TypeRule.Kind.SOURCE ? "PRODUCER" : "");
+    }
+
+    private List<ContainerContext> contextsAt(ProgramPoint point, int parameter, Set<StorageSlot> slots, String code) {
+        List<ContainerContext> result = new ArrayList<>();
+        Set<ProgramPoint> path = graph.evidence(graph.at(point, parameter)).stream()
+                .flatMap(edge -> java.util.stream.Stream.of(edge.fromPoint(), edge.toPoint()))
+                .collect(java.util.stream.Collectors.toSet());
+        for (StorageSlot slot : slots.stream().sorted(java.util.Comparator.comparing(value -> ConstraintGraph.storage(value).point().key())).toList()) {
+            if (code.equals("ESCAPED_CONTAINER") || code.equals("UNKNOWN_CONTAINER_USE")) {
+                String operation = containerEffects.accesses().stream().filter(access -> access.point().equals(point)
+                        && access.parameter() == parameter).map(access -> access.kind().name()).findFirst().orElse("UNKNOWN_OPERATION");
+                result.add(context(slot, site(point), operation));
+                continue;
+            }
+            var matching = containerUses.stream().filter(use -> use.summary() != null && use.receivers().slots(use.summary().channel()).contains(slot))
+                    .sorted(java.util.Comparator.comparing((ContainerUse use) -> !use.site().point().equals(point))
+                            .thenComparing(use -> code.contains("PRODUCER") ? !use.summary().writesElement() : !use.summary().readsElement())
+                            .thenComparing(use -> !path.contains(ConstraintGraph.value(use.site().point()).point())
+                                    && !path.contains(ConstraintGraph.use(use.site().point(), use.summary().elementParameter()).point()))
+                            .thenComparing(use -> use.site().point().key())).findFirst();
+            matching.ifPresent(use -> result.add(context(slot, use.site(), use.summary().operation().name())));
+        }
+        return List.copyOf(result);
     }
 
     private RuleRequirement requirement(String code) {
@@ -916,21 +1067,30 @@ final class RepresentationSolver {
     }
 
     private List<DependencyStep> dependencyPath(ProgramPoint start, List<PropagationEdge> edges) {
-        List<DependencyStep> path = new ArrayList<>();
-        Set<ProgramPoint> visited = new LinkedHashSet<>();
-        ArrayDeque<ProgramPoint> pending = new ArrayDeque<>();
-        pending.add(start);
+        var goals = edges.stream().flatMap(edge -> java.util.stream.Stream.of(edge.fromPoint(), edge.toPoint()))
+                .filter(point -> java.util.Objects.equals(point.method(), start.method()) && point.instruction() == start.instruction())
+                .sorted(java.util.Comparator.comparing(ProgramPoint::key)).toList();
+        var roots = edges.stream().filter(edge -> edge.kind() == DependencyKind.TARGET_ARGUMENT)
+                .map(PropagationEdge::fromPoint).distinct().sorted(java.util.Comparator.comparing(ProgramPoint::key)).toList();
+        ArrayDeque<ProgramPoint> pending = new ArrayDeque<>(roots);
+        Set<ProgramPoint> visited = new HashSet<>(roots);
+        Map<ProgramPoint, ProgramPoint> parents = new LinkedHashMap<>();
         while (!pending.isEmpty()) {
             ProgramPoint point = pending.removeFirst();
-            if (!visited.add(point)) {
-                continue;
+            if (goals.contains(point)) {
+                List<DependencyStep> path = new ArrayList<>();
+                for (ProgramPoint current = point; current != null; current = parents.get(current)) path.add(step(current));
+                return List.copyOf(path);
             }
-            path.add(step(point));
-            edges.stream().filter(edge -> edge.toPoint().equals(point))
-                    .sorted(java.util.Comparator.comparing(edge -> edge.fromPoint().key()))
-                    .forEach(edge -> pending.addLast(edge.fromPoint()));
+            edges.stream().filter(edge -> edge.fromPoint().equals(point)).map(PropagationEdge::toPoint)
+                    .sorted(java.util.Comparator.comparing(ProgramPoint::key)).forEach(next -> {
+                        if (visited.add(next)) {
+                            parents.put(next, point);
+                            pending.addLast(next);
+                        }
+                    });
         }
-        return List.copyOf(path);
+        return List.of();
     }
 
     private static DependencyStep step(ProgramPoint point) {

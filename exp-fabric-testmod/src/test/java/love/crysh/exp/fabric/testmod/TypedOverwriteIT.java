@@ -678,10 +678,11 @@ class TypedOverwriteIT {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"compatible", "independent", "conflict", "rules"})
+    @ValueSource(strings = {"compatible", "independent", "conflict", "rules", "boxed", "primitive", "transfer", "missing", "null", "external"})
     void coordinatesRepresentationRequirementsThroughRealMixin(String scenario) throws Exception {
         boolean independent = scenario.equals("independent");
-        boolean compatible = scenario.equals("compatible");
+        boolean cross = List.of("boxed", "primitive", "transfer").contains(scenario);
+        boolean compatible = scenario.equals("compatible") || cross || scenario.equals("missing") || scenario.equals("external");
         String type = compatible || scenario.equals("rules") ? "BlockPos" : "OtherPos";
         String rules = """
                 package fixture;
@@ -716,6 +717,38 @@ class TypedOverwriteIT {
                 }
                 """.formatted(independent ? "new java.util.ArrayDeque<>()" : "a",
                         independent ? "b.add(new BlockPos(3).asLong());" : "");
+        String body = switch (scenario) {
+            case "boxed", "primitive" -> """
+                    %s value = new BlockPos(12).asLong();
+                    java.util.Queue<Long> a = new java.util.ArrayDeque<>();
+                    java.util.Queue<Long> b = new java.util.ArrayDeque<>();
+                    a.add(value); b.add(value);
+                    return first(a.peek()) + second(b.peek());
+                    """.formatted(scenario.equals("boxed") ? "Long" : "long");
+            case "transfer" -> """
+                    java.util.Queue<Long> a = new java.util.ArrayDeque<>();
+                    java.util.Queue<Long> b = new java.util.ArrayDeque<>();
+                    a.add(new BlockPos(12).asLong()); b.add(a.peek());
+                    return first(a.peek()) + second(b.peek());
+                    """;
+            case "missing", "external" -> """
+                    java.util.Queue<Long> a = new java.util.ArrayDeque<>();
+                    a.add(%s); %s
+                    return first(a.peek()) + second(a.peek());
+                    """.formatted(scenario.equals("missing") ? "12L" : "new BlockPos(12).asLong()",
+                            scenario.equals("external") ? "a.toArray();" : "");
+            case "null" -> """
+                    Long empty = null;
+                    java.util.Queue<Long> a = new java.util.LinkedList<>();
+                    java.util.Queue<Long> b = new java.util.LinkedList<>();
+                    a.add(new BlockPos(12).asLong()); a.add(empty);
+                    b.add(new BlockPos(3).asLong()); b.add(empty);
+                    return first(a.peek()) + second(b.peek());
+                    """;
+            default -> null;
+        };
+        if (body != null) methods = methods.substring(0, methods.indexOf("public static long run()"))
+                + "public static long run(){" + body + "}";
         Map<String, String> app = new LinkedHashMap<>();
         app.put(SUBJECT, "package love.crysh.exp; public final class Subject {" + methods + "}");
         app.put("love.crysh.exp.BlockPos", "package love.crysh.exp; public record BlockPos(long value){public long asLong(){return value;}}");
@@ -754,12 +787,20 @@ class TypedOverwriteIT {
                 public static int second(love.crysh.exp.%s value){return (int)value.value();}
                 """.formatted(compatible ? "RulesA" : "RulesB", type);
         Result result = launch(app, Map.of("SubjectMixin", mixin("SubjectMixin", 1000, declarations)), List.of(), helpers);
-        if (compatible || independent) {
+        if (cross || scenario.equals("compatible") || independent || scenario.equals("null")) {
             result.success();
-            result.contains("RESULT=" + (compatible ? 52 : 34), "SOURCES=" + (compatible ? 1 : 2), "BATCH_BYTECODE_VERIFIED");
+            int expected = cross ? 24 : scenario.equals("null") ? 15 : compatible ? 52 : 34;
+            result.contains("RESULT=" + expected, "SOURCES=" + (compatible ? 1 : 2), "BATCH_BYTECODE_VERIFIED");
         } else {
-            result.failure(scenario.equals("conflict") ? "CONTAINER_FACT_CONFLICT" : "REPRESENTATION_RULE_CONFLICT",
+            String code = switch (scenario) {
+                case "conflict" -> "CONTAINER_FACT_CONFLICT";
+                case "missing" -> "MISSING_PRODUCER_RULE";
+                case "external" -> "UNKNOWN_CONTAINER_USE";
+                default -> "REPRESENTATION_RULE_CONFLICT";
+            };
+            result.failure(code,
                     "Storage:", "Channel:", "Operation:", "Analysis failed. No transformations published.");
+            if (scenario.equals("external")) result.contains("Operation: UNKNOWN_OPERATION");
             assertFalse(result.log().contains("OUTPUT_VERIFICATION_FAILED"), result.log());
         }
     }
