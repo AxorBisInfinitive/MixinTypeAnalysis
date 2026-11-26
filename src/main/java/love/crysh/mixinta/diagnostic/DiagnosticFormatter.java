@@ -7,7 +7,10 @@ import love.crysh.mixinta.model.PropagationEdge;
 import org.objectweb.asm.Type;
 
 import java.util.ArrayList;
+import java.util.ArrayDeque;
 import java.util.Comparator;
+import java.util.HashMap;
+import java.util.HashSet;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -40,13 +43,20 @@ final class DiagnosticFormatter {
     }
 
     private static boolean hasContext(Diagnostic diagnostic) {
-        return diagnostic.target() != null || diagnostic.requirement() != null || !diagnostic.dependencyPath().isEmpty();
+        return diagnostic.target() != null || diagnostic.requirement() != null || !diagnostic.dependencyPath().isEmpty()
+                || !diagnostic.migrations().isEmpty();
     }
 
     private static void appendTargets(StringBuilder output, List<Diagnostic> diagnostics, DiagnosticVerbosity verbosity) {
         output.append(System.lineSeparator()).append("Target:").append(System.lineSeparator());
         Set<String> targets = new LinkedHashSet<>();
         for (Diagnostic diagnostic : diagnostics) {
+            for (MigrationRequirement migration : diagnostic.migrations()) {
+                targets.add(displayTargetMethod(migration.target(), verbosity) + System.lineSeparator()
+                        + "parameter " + migration.parameter() + ": "
+                        + displayType(Type.getArgumentTypes(migration.target().descriptor())[migration.parameter()].getDescriptor(), verbosity)
+                        + " -> " + displayType(migration.representation(), verbosity));
+            }
             if (diagnostic.target() == null) {
                 continue;
             }
@@ -97,6 +107,33 @@ final class DiagnosticFormatter {
         } else if (!diagnostic.message().isEmpty() && diagnostic.method() != null) {
             output.append("    Message:  ").append(diagnostic.message()).append(System.lineSeparator());
         }
+        for (ContainerContext context : diagnostic.containers()) {
+            output.append(System.lineSeparator()).append("    Storage:").append(System.lineSeparator())
+                    .append("        ").append(displayMethod(context.storage().method(), verbosity))
+                    .append(" instruction ").append(context.storage().instruction()).append(System.lineSeparator())
+                    .append("    Channel: ").append(context.channel()).append(System.lineSeparator())
+                    .append("    Operation: ").append(context.operation()).append(System.lineSeparator())
+                    .append("    State: ").append(context.state()).append(System.lineSeparator());
+            if (verbosity == DiagnosticVerbosity.VERBOSE) {
+                output.append("    Allocation: ").append(context.descriptor()).append(System.lineSeparator())
+                        .append("    Access: ").append(displayPoint(context.access(), verbosity)).append(System.lineSeparator());
+            }
+        }
+        for (MigrationRequirement migration : diagnostic.migrations()) {
+            output.append(System.lineSeparator()).append("    Migration: ").append(migration.id())
+                    .append(" -> ").append(displayType(migration.representation(), verbosity)).append(System.lineSeparator());
+            if (!migration.dependencies().isEmpty()) {
+                output.append("    Dependency:").append(System.lineSeparator());
+                appendPath(output, migrationPath(diagnostic, migration), verbosity);
+                if (verbosity == DiagnosticVerbosity.VERBOSE) {
+                    for (PropagationEdge edge : migration.dependencies()) {
+                        output.append("    Edge: ").append(displayPoint(edge.fromPoint(), verbosity)).append(" -> ")
+                                .append(displayPoint(edge.toPoint(), verbosity)).append(" ").append(edge.kind())
+                                .append(System.lineSeparator());
+                    }
+                }
+            }
+        }
         List<DependencyStep> path = diagnostic.dependencyPath();
         if (path.isEmpty() && !diagnostic.propagation().isEmpty()) {
             path = fallbackPath(diagnostic.propagation());
@@ -130,6 +167,37 @@ final class DiagnosticFormatter {
             }
             output.append(System.lineSeparator());
         }
+    }
+
+    private static List<DependencyStep> migrationPath(Diagnostic diagnostic, MigrationRequirement requirement) {
+        List<ProgramPoint> goals = diagnostic.containers().stream().map(ContainerContext::storage).toList();
+        if (goals.isEmpty() && diagnostic.method() != null) {
+            goals = List.of(new ProgramPoint(diagnostic.method(), diagnostic.instruction(), diagnostic.failureSymbol()));
+        }
+        List<ProgramPoint> destinations = goals;
+        var roots = requirement.dependencies().stream()
+                .filter(edge -> edge.kind() == love.crysh.mixinta.model.DependencyKind.TARGET_ARGUMENT)
+                .map(PropagationEdge::fromPoint).distinct().sorted(Comparator.comparing(ProgramPoint::key)).toList();
+        ArrayDeque<ProgramPoint> pending = new ArrayDeque<>(roots);
+        Set<ProgramPoint> visited = new HashSet<>(roots);
+        Map<ProgramPoint, ProgramPoint> parents = new HashMap<>();
+        while (!pending.isEmpty()) {
+            ProgramPoint point = pending.removeFirst();
+            if (destinations.stream().anyMatch(goal -> java.util.Objects.equals(goal.method(), point.method())
+                    && goal.instruction() == point.instruction())) {
+                List<DependencyStep> path = new ArrayList<>();
+                for (ProgramPoint current = point; current != null; current = parents.get(current)) path.add(step(current));
+                return List.copyOf(path);
+            }
+            requirement.dependencies().stream().filter(edge -> edge.fromPoint().equals(point))
+                    .map(PropagationEdge::toPoint).sorted(Comparator.comparing(ProgramPoint::key)).forEach(next -> {
+                        if (visited.add(next)) {
+                            parents.put(next, point);
+                            pending.addLast(next);
+                        }
+                    });
+        }
+        return fallbackPath(requirement.dependencies());
     }
 
     private static List<DependencyStep> fallbackPath(List<PropagationEdge> edges) {

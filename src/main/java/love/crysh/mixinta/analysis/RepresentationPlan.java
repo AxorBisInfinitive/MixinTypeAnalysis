@@ -2,6 +2,8 @@ package love.crysh.mixinta.analysis;
 
 import love.crysh.mixinta.anno.TypeRule;
 import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.bytecode.PrimitiveConversions;
+import love.crysh.mixinta.diagnostic.Diagnostic;
 import love.crysh.mixinta.model.MethodKey;
 import love.crysh.mixinta.model.PlanChange;
 import love.crysh.mixinta.model.PropagationEdge;
@@ -21,6 +23,9 @@ import org.objectweb.asm.tree.VarInsnNode;
 
 import java.util.List;
 import java.util.Map;
+import java.util.LinkedHashMap;
+import java.util.Objects;
+import java.util.regex.Pattern;
 
 /** 只保存固定输入的位置和生成参数，apply 每次在独立节点上执行。 */
 record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local> locals,
@@ -32,6 +37,97 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
         bridges = List.copyOf(bridges);
         changes = List.copyOf(changes);
         dependencies = List.copyOf(dependencies);
+    }
+
+    static RepresentationPlan merge(List<RepresentationPlan> plans, Map<String, ClassNode> classes, List<Diagnostic> diagnostics) {
+        Map<Location, Edit> edits = new LinkedHashMap<>();
+        Map<Location, Map<Integer, Argument>> arguments = new LinkedHashMap<>();
+        Map<Location, Local> locals = new LinkedHashMap<>();
+        Map<MethodKey, Bridge> bridges = new LinkedHashMap<>();
+        for (RepresentationPlan plan : plans) {
+            for (Edit edit : plan.edits()) {
+                Edit previous = edits.putIfAbsent(edit.location(), edit);
+                if (previous != null && !previous.equals(edit)) {
+                    conflict(edit.location(), "Instruction requires different edits", diagnostics);
+                }
+            }
+            for (Argument argument : plan.arguments()) {
+                var parameters = arguments.computeIfAbsent(argument.location(), ignored -> new LinkedHashMap<>());
+                Argument previous = parameters.putIfAbsent(argument.parameter(), argument);
+                if (previous != null && (!previous.original().equals(argument.original())
+                        || !previous.implementation().equals(argument.implementation())
+                        || !previous.representation().equals(argument.representation())
+                        || !Objects.equals(previous.encoder(), argument.encoder()))) {
+                    conflict(argument.location(), "Argument requires incompatible conversions parameter=" + argument.parameter(), diagnostics);
+                }
+            }
+            for (Local local : plan.locals()) {
+                Location key = new Location(local.method(), local.index());
+                Local previous = locals.putIfAbsent(key, local);
+                if (previous == null || previous.equals(local)) continue;
+                try {
+                    if (!previous.descriptor().equals(local.descriptor())) {
+                        throw new IllegalArgumentException("Local variable requires incompatible descriptors");
+                    }
+                    var original = ClassFiles.findMethod(classes.get(local.method().owner()), local.method().name(),
+                            local.method().descriptor()).localVariables.get(local.index());
+                    locals.put(key, new Local(local.method(), local.index(), local.descriptor(),
+                            mergeSignature(original.signature, previous.signature(), local.signature())));
+                } catch (IllegalArgumentException failure) {
+                    conflict(new Location(local.method(), -1), failure.getMessage() + " local=" + local.index(), diagnostics);
+                }
+            }
+            for (Bridge bridge : plan.bridges()) {
+                Bridge previous = bridges.putIfAbsent(bridge.method(), bridge);
+                if (previous != null && !previous.equals(bridge)) {
+                    conflict(new Location(bridge.method(), -1), "Rule bridge requires different helpers", diagnostics);
+                }
+            }
+        }
+        for (var entry : arguments.entrySet()) {
+            if (entry.getValue().values().stream().map(Argument::implementation).distinct().count() > 1) {
+                conflict(entry.getKey(), "Invocation requires incompatible final descriptors", diagnostics);
+            }
+            if (edits.containsKey(entry.getKey())) {
+                conflict(entry.getKey(), "Invocation replacement overlaps argument conversion", diagnostics);
+            }
+        }
+        return new RepresentationPlan(List.copyOf(edits.values()), arguments.values().stream()
+                .flatMap(parameters -> parameters.values().stream().sorted(java.util.Comparator.comparingInt(Argument::parameter))).toList(),
+                List.copyOf(locals.values()), List.copyOf(bridges.values()),
+                plans.stream().flatMap(plan -> plan.changes().stream()).distinct().toList(),
+                plans.stream().flatMap(plan -> plan.dependencies().stream()).distinct().toList());
+    }
+
+    private static void conflict(Location location, String message, List<Diagnostic> diagnostics) {
+        diagnostics.add(new Diagnostic("REPRESENTATION_PLAN_CONFLICT", location.method(), location.instruction(), -1, message));
+    }
+
+    private static String mergeSignature(String original, String first, String second) {
+        if (Objects.equals(first, second)) return first;
+        if (Objects.equals(original, first)) return second;
+        if (Objects.equals(original, second)) return first;
+        if (original == null || first == null || second == null) {
+            throw new IllegalArgumentException("Local variable requires incompatible generic signatures");
+        }
+        String[] parts = original.split("Ljava/lang/Long;", -1);
+        String pattern = java.util.Arrays.stream(parts).map(Pattern::quote)
+                .collect(java.util.stream.Collectors.joining("(L[^;<>]+;)"));
+        var left = Pattern.compile(pattern).matcher(first);
+        var right = Pattern.compile(pattern).matcher(second);
+        if (!left.matches() || !right.matches()) {
+            throw new IllegalArgumentException("Generic signature changes have incompatible structure");
+        }
+        StringBuilder result = new StringBuilder(parts[0]);
+        for (int index = 1; index < parts.length; index++) {
+            String a = left.group(index);
+            String b = right.group(index);
+            if (!a.equals(b) && !a.equals("Ljava/lang/Long;") && !b.equals("Ljava/lang/Long;")) {
+                throw new IllegalArgumentException("Generic argument requires incompatible representations");
+            }
+            result.append(a.equals("Ljava/lang/Long;") ? b : a).append(parts[index]);
+        }
+        return result.toString();
     }
 
     record Location(MethodKey method, int instruction) {
@@ -231,6 +327,10 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
                     } else {
                         conversion.add(invoke(argument.encoder()));
                     }
+                }
+                Type actual = argument != null && argument.encoder() != null ? original[index] : current[index];
+                for (int opcode : PrimitiveConversions.opcodes(actual, replacement[index])) {
+                    conversion.add(new InsnNode(opcode));
                 }
             }
             method.instructions.insertBefore(invocation, conversion);

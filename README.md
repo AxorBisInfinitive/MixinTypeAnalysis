@@ -100,6 +100,10 @@ public class ExampleMixin {
 
 同一方法体汇总全部调用输入，相关存储共同满足元素表示要求。容器参数和返回值保留原始 JVM 描述符，跨方法传播存储身份及其元素约束。当前支持旧 long 消费者通过 `ENCODE` 取得原表示，任意元素参数与返回类型的跨方法改写仍待实现。其他类调用 private 规则时，计划在规则所属类生成 public static synthetic 转发方法，并检查规则所属类和表示类型的访问权限。
 
+同一批次中的多个引用迁移声明共同检查值与存储通道。`RepresentationBatch` 按容器规则作用域复用稳定来源帧和调用图，每个声明独立保留需求、规则选择及推导依据。共享通道要求不同表示时报告 `CONTAINER_FACT_CONFLICT`，共享值的类型冲突报告 `VALUE_FACT_CONFLICT`，同一使用位置要求不同辅助方法、绑定或规则版本时报告 `REPRESENTATION_RULE_CONFLICT`。显式相同 id 要求不同表示时报告 `MIGRATION_ID_CONFLICT`。不同 id 可以提出兼容要求，相同 JVM 类型仍须检查实际改写动作。
+
+兼容动作在固定 Mixin 后快照上合并，每条指令只执行一次最终改写。同一调用上的全部参数一起分配临时槽并应用编码及 primitive 转换，独立通道的泛型调试信息共同更新。来源、读取与编码继续遵守各声明的规则作用域。未选中迁移的已知存储通道保持原表示，缺少来源或规则的要求保持未解决状态。四态汇总为 `UNKNOWN`、`ORIGINAL`、`MIGRATED` 和 `CONFLICT`。
+
 核心 API 接收一个 ClassLoader 对应的固定类集合，Map 的键使用 JVM 内部类名。调用方负责提供完整的参与类集合。
 
 ```java
@@ -142,6 +146,8 @@ Map<String, byte[]> transformedClasses = plan.apply();
 准备结果和计划持有输入快照，公开返回的字节数组可以独立修改。分析失败和输出验证失败均抛出 `TypedOverwriteException`，其 `diagnostics()` 返回稳定排序的完整诊断。改写不会修改调用方传入的类数据，计划可以重复执行。
 
 诊断消息默认按未解决约束分组，包含目标迁移、调用位置、规则要求和一条依赖路径。分析失败的最后一行固定为 `Analysis failed. No transformations published.`。设置系统属性 `-Dmixinta.diagnostics=verbose`，或调用 `format(DiagnosticVerbosity.VERBOSE)`，可追加完整描述符、迁移身份、候选规则和全部传播边。
+
+容器诊断通过 `ContainerContext` 保存根分配、通道、真实访问位置、operation 和元素事实状态。跨声明诊断通过 `MigrationRequirement` 保存冲突双方及各自推导。普通输出显示 `Storage`、`Channel`、`Operation`、`State` 和各声明的依赖路径，verbose 追加完整分配描述符、访问位置和传播边。表示与规则冲突在 `analyze` 阶段汇总，计划动作冲突使用 `REPRESENTATION_PLAN_CONFLICT`，输出验证继续检查实际生成的字节码。
 
 栈帧所需的层次信息先从输入类读取，再通过资源 ClassLoader 读取外部 class 文件。计算过程中避免定义或初始化被分析的类，缺少层次信息时报告错误。
 

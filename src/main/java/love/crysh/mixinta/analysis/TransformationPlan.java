@@ -58,6 +58,11 @@ public final class TransformationPlan {
         Map<MethodKey, Integer> temporaryBases = new HashMap<>();
         Set<String> modified = new HashSet<>();
         Map<MethodKey, AbstractInsnNode[]> representationInstructions = new HashMap<>();
+        for (CallSite call : calls) {
+            MethodKey key = call.caller();
+            MethodNode method = ClassFiles.findMethod(nodes.get(key.owner()), key.name(), key.descriptor());
+            originalInstructions.computeIfAbsent(key, ignored -> method.instructions.toArray());
+        }
         for (RepresentationPlan plan : representationPlans) {
             for (RepresentationPlan.Edit edit : plan.edits()) {
                 MethodKey key = edit.location().method();
@@ -84,6 +89,9 @@ public final class TransformationPlan {
         }
         for (CallSite call : calls) {
             MethodKey key = call.caller();
+            if (representationPlans.stream().flatMap(plan -> plan.arguments().stream())
+                    .anyMatch(argument -> argument.location().method().equals(key)
+                            && argument.location().instruction() == call.instruction())) continue;
             MethodNode method = ClassFiles.findMethod(nodes.get(key.owner()), key.name(), key.descriptor());
             AbstractInsnNode[] instructions = originalInstructions.computeIfAbsent(key, ignored -> method.instructions.toArray());
             int temporaryBase = temporaryBases.computeIfAbsent(key, ignored -> method.maxLocals);

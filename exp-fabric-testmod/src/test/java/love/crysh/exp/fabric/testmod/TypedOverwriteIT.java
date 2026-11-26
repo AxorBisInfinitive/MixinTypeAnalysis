@@ -677,6 +677,93 @@ class TypedOverwriteIT {
         result.contains("APPLICATIONS=1", "RESULT=1");
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"compatible", "independent", "conflict", "rules"})
+    void coordinatesRepresentationRequirementsThroughRealMixin(String scenario) throws Exception {
+        boolean independent = scenario.equals("independent");
+        boolean compatible = scenario.equals("compatible");
+        String type = compatible || scenario.equals("rules") ? "BlockPos" : "OtherPos";
+        String rules = """
+                package fixture;
+                import love.crysh.mixinta.anno.TypeRule;
+                import love.crysh.exp.BlockPos;
+                import love.crysh.exp.OtherPos;
+                public class %s {
+                    public static int sources;
+                    @TypeRule(value=TypeRule.Kind.SOURCE, method="love.crysh.exp.BlockPos.asLong()J")
+                    public static %s keep(BlockPos value) { sources++; return %s; }
+                    @TypeRule(TypeRule.Kind.READ)
+                    public static %s read(%s value) { return java.util.Objects.requireNonNull(value); }
+                    @TypeRule(TypeRule.Kind.ENCODE)
+                    public static long encode(%s value) { return value.value(); }
+                }
+                """;
+        Map<String, String> helpers = Map.of(
+                "fixture.RulesA", rules.formatted("RulesA", "BlockPos", "value", "BlockPos", "BlockPos", "BlockPos"),
+                "fixture.RulesB", rules.formatted("RulesB", type, type.equals("BlockPos") ? "value" : "new OtherPos(value.value())",
+                        type, type, type));
+        String methods = """
+                public static int first(long value) { return (int)value; }
+                public static int second(long value) { return (int)value; }
+                public static long legacy(long a, double b, long c) { return a + (long)b + c; }
+                public static long run() {
+                    java.util.Queue<Long> a = new java.util.ArrayDeque<>();
+                    java.util.Queue<Long> b = %s;
+                    a.add(new BlockPos(12).asLong());
+                    %s
+                    long av=a.peek(); long bv=b.peek();
+                    return first(av) + second(bv) + legacy(av, 4.0, bv);
+                }
+                """.formatted(independent ? "new java.util.ArrayDeque<>()" : "a",
+                        independent ? "b.add(new BlockPos(3).asLong());" : "");
+        Map<String, String> app = new LinkedHashMap<>();
+        app.put(SUBJECT, "package love.crysh.exp; public final class Subject {" + methods + "}");
+        app.put("love.crysh.exp.BlockPos", "package love.crysh.exp; public record BlockPos(long value){public long asLong(){return value;}}");
+        app.put("love.crysh.exp.OtherPos", "package love.crysh.exp; public record OtherPos(long value){}");
+        app.put("love.crysh.exp.Main", """
+                package love.crysh.exp;
+                public class Main {
+                    public static void main(String[] args) throws Exception {
+                        System.out.println("BUSINESS_EXECUTED");
+                        System.out.println("RESULT=" + Subject.run());
+                        int sources = Class.forName("fixture.RulesA").getField("sources").getInt(null)
+                                + Class.forName("fixture.RulesB").getField("sources").getInt(null);
+                        System.out.println("SOURCES=" + sources);
+                        Subject.class.getDeclaredMethod("first", BlockPos.class);
+                        Subject.class.getDeclaredMethod("second", %s.class);
+                        var field = love.crysh.mixinta.runtime.TypedOverwriteRuntime.class.getDeclaredField("outputs");
+                        field.setAccessible(true);
+                        var snapshots = (java.util.Map<String, byte[]>)field.get(null);
+                        var node = new org.objectweb.asm.tree.ClassNode();
+                        new org.objectweb.asm.ClassReader(snapshots.get("love/crysh/exp/Subject")).accept(node, 0);
+                        var run = node.methods.stream().filter(method -> method.name.equals("run")).findFirst().orElseThrow();
+                        for (var instruction : run.instructions) {
+                            if (instruction instanceof org.objectweb.asm.tree.MethodInsnNode call
+                                    && call.owner.equals("java/lang/Long")) throw new AssertionError("Boxing survived: " + call.name);
+                        }
+                        System.out.println("BATCH_BYTECODE_VERIFIED");
+                    }
+                }
+                """.formatted(type));
+        String declarations = """
+                @love.crysh.mixinta.anno.TypedOverwrite(method="first(J)I",
+                    parameters=@love.crysh.mixinta.anno.ParameterMigration(parameter=0, rules=fixture.RulesA.class))
+                public static int first(love.crysh.exp.BlockPos value){return (int)value.value();}
+                @love.crysh.mixinta.anno.TypedOverwrite(method="second(J)I",
+                    parameters=@love.crysh.mixinta.anno.ParameterMigration(parameter=0, rules=fixture.%s.class))
+                public static int second(love.crysh.exp.%s value){return (int)value.value();}
+                """.formatted(compatible ? "RulesA" : "RulesB", type);
+        Result result = launch(app, Map.of("SubjectMixin", mixin("SubjectMixin", 1000, declarations)), List.of(), helpers);
+        if (compatible || independent) {
+            result.success();
+            result.contains("RESULT=" + (compatible ? 52 : 34), "SOURCES=" + (compatible ? 1 : 2), "BATCH_BYTECODE_VERIFIED");
+        } else {
+            result.failure(scenario.equals("conflict") ? "CONTAINER_FACT_CONFLICT" : "REPRESENTATION_RULE_CONFLICT",
+                    "Storage:", "Channel:", "Operation:", "Analysis failed. No transformations published.");
+            assertFalse(result.log().contains("OUTPUT_VERIFICATION_FAILED"), result.log());
+        }
+    }
+
     private static Map<String, String> application(String method, String main) {
         Map<String, String> sources = new LinkedHashMap<>();
         sources.put("love.crysh.exp.Subject", "package love.crysh.exp; public final class Subject {" + method + "}");

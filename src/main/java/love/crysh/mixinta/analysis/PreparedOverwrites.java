@@ -107,19 +107,19 @@ public final class PreparedOverwrites {
         }
         ClassFiles.throwIfErrors(diagnostics);
         Map<MethodKey, Migration> byTarget = new HashMap<>();
-        List<RepresentationPlan> representationPlans = new ArrayList<>();
+        List<RepresentationMigration> representations = new ArrayList<>();
         for (Migration migration : migrations) {
             byTarget.put(migration.original(), migration);
             validateMergedMethods(migration, nodes, originalNodes, diagnostics);
             if (!migration.representations().isEmpty()) {
                 List<RepresentationMigration> resolved = migration.representations().stream()
                         .map(value -> RepresentationRules.resolve(value, nodes, diagnostics)).toList();
-                for (RepresentationMigration representation : resolved) {
-                    representationPlans.add(new RepresentationSolver(nodes, List.of(representation),
-                            Map.of(migration.original(), migration), hierarchy, diagnostics).analyze().plan());
-                }
+                representations.addAll(resolved);
             }
         }
+        ClassFiles.throwIfErrors(diagnostics);
+        List<RepresentationPlan> representationPlans = representations.isEmpty() ? List.of()
+                : List.of(RepresentationBatch.analyze(representations, nodes, byTarget, hierarchy, diagnostics));
         Set<MethodKey> replacedMethods = byTarget.keySet();
         List<CallSite> calls = new ArrayList<>();
         for (ClassNode node : nodes.values()) {

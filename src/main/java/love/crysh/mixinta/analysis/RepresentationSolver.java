@@ -4,9 +4,11 @@ import love.crysh.mixinta.anno.TypeRule;
 import love.crysh.mixinta.bytecode.ClassFiles;
 import love.crysh.mixinta.bytecode.ClassHierarchy;
 import love.crysh.mixinta.diagnostic.DependencyStep;
+import love.crysh.mixinta.diagnostic.ContainerContext;
 import love.crysh.mixinta.diagnostic.Diagnostic;
 import love.crysh.mixinta.diagnostic.RuleRequirement;
 import love.crysh.mixinta.model.DependencyKind;
+import love.crysh.mixinta.model.ElementState;
 import love.crysh.mixinta.model.MethodKey;
 import love.crysh.mixinta.model.PlanChange;
 import love.crysh.mixinta.model.ProgramPoint;
@@ -42,7 +44,18 @@ import java.util.Set;
 /** 从固定 Mixin 后快照求解一组具有相同迁移身份的值与存储要求。 */
 final class RepresentationSolver {
     record Analysis(RepresentationPlan plan, Set<RepresentationPlan.Location> values,
-            Set<RepresentationPlan.Location> storages) {
+            Set<StorageSlot> storages, Map<RuleUse, RepresentationMigration.Rule> rules,
+            List<PropagationEdge> dependencies, List<ContainerContext> containers) {
+    }
+
+    record RuleUse(RepresentationPlan.Location location, TypeRule.Kind kind, int parameter) {
+    }
+
+    record Input(List<MethodFlow> flows, Map<MethodKey, MethodContainerSummary> summaries, ContainerCallGraph callGraph) {
+        Input {
+            flows = List.copyOf(flows);
+            summaries = Map.copyOf(summaries);
+        }
     }
 
     private record Site(MethodFlow flow, int index) {
@@ -95,6 +108,7 @@ final class RepresentationSolver {
     private final Set<String> diagnosticKeys = new HashSet<>();
     private final Set<PropagationEdge> dependencies = new LinkedHashSet<>();
     private final Map<AbstractInsnNode, RepresentationMigration.Rule> selected = new IdentityHashMap<>();
+    private final Map<RuleUse, RepresentationMigration.Rule> rules = new LinkedHashMap<>();
     private final List<RepresentationPlan.Edit> edits = new ArrayList<>();
     private final List<RepresentationPlan.Argument> arguments = new ArrayList<>();
     private final List<RepresentationPlan.Local> locals = new ArrayList<>();
@@ -117,15 +131,23 @@ final class RepresentationSolver {
         this.containers = new ContainerRules(migration.containers());
     }
 
-    Analysis analyze() {
-        analyzeMethods();
+    Analysis solve(Input input) {
+        if (input == null) {
+            analyzeMethods();
+        } else {
+            flows.addAll(input.flows());
+            methodSummaries.putAll(input.summaries());
+            callGraph = input.callGraph();
+            flows.forEach(flow -> flow.indices.forEach((instruction, index) -> sites.put(instruction, new Site(flow, index))));
+        }
         if (flows.stream().anyMatch(flow -> flow.frames == null)) {
-            finishDiagnostics();
             return result();
         }
-        callGraph = new ContainerCallGraph(classes, flows, hierarchy, containers);
-        callGraph.solve();
-        methodSummaries.putAll(callGraph.summaries());
+        if (callGraph == null) {
+            callGraph = new ContainerCallGraph(classes, flows, hierarchy, containers);
+            callGraph.solve();
+            methodSummaries.putAll(callGraph.summaries());
+        }
         dependencies.addAll(callGraph.dependencies());
         indexContainerUses();
         indexContainerEffects();
@@ -137,8 +159,18 @@ final class RepresentationSolver {
             propagateStorage();
             unifyLocalMerges();
         } while (!pending.isEmpty() || previous != requested.size() + storages.size());
-        validateUses();
-        validateContainerEffects();
+        return result();
+    }
+
+    Input input() {
+        return callGraph == null ? null : new Input(flows, methodSummaries, callGraph);
+    }
+
+    Analysis finish() {
+        if (callGraph != null) {
+            validateUses();
+            validateContainerEffects();
+        }
         finishDiagnostics();
         if (issues.isEmpty()) {
             for (MethodFlow flow : flows) {
@@ -150,9 +182,22 @@ final class RepresentationSolver {
 
     private Analysis result() {
         return new Analysis(new RepresentationPlan(edits, arguments, locals, List.copyOf(bridges.values()), changes, orderedEdges(dependencies)),
-                migrated.stream().map(origin -> location(sites.get(origin))).collect(java.util.stream.Collectors.toSet()),
-                storages.stream().map(slot -> new RepresentationPlan.Location(slot.storage().method(), slot.storage().instruction()))
-                        .collect(java.util.stream.Collectors.toSet()));
+                requested.stream().map(origin -> location(sites.get(origin))).collect(java.util.stream.Collectors.toSet()),
+                Set.copyOf(storages), Map.copyOf(rules), orderedEdges(dependencies), containerContexts());
+    }
+
+    private List<ContainerContext> containerContexts() {
+        List<ContainerContext> contexts = new ArrayList<>();
+        for (ContainerUse use : containerUses) {
+            if (use.summary() == null) continue;
+            for (StorageSlot slot : use.receivers().slots(use.summary().channel())) {
+                ElementState state = !storages.contains(slot) ? ElementState.ORIGINAL
+                        : issues.isEmpty() ? ElementState.MIGRATED : ElementState.UNKNOWN;
+                contexts.add(new ContainerContext(storagePoint(slot.storage()), slot.storage().descriptor(),
+                        slot.channel(), use.site().point(), use.summary().operation().name(), state));
+            }
+        }
+        return contexts.stream().distinct().toList();
     }
 
     private void analyzeMethods() {
@@ -297,6 +342,7 @@ final class RepresentationSolver {
                     migrated.add(origin);
                     if (candidates.size() == 1) {
                         selected.put(origin, candidates.getFirst());
+                        rules.put(new RuleUse(location(site), TypeRule.Kind.SOURCE, -1), candidates.getFirst());
                         checkHelperAccess(candidates.getFirst().helper(), site);
                     } else {
                         candidateProblem("AMBIGUOUS_SOURCE_RULE", site, "Multiple applicable source rules " + symbol(call),
@@ -482,14 +528,14 @@ final class RepresentationSolver {
                 continue;
             }
             Migration target = target(call);
-            boolean matchingTarget = target != null && migrations.stream().anyMatch(declaration ->
+            boolean matchingTarget = target != null && target.representations().stream().anyMatch(declaration ->
                     declaration.target().equals(target.original()) && declaration.parameter() == parameterIndex);
             if (matchingTarget || isBox(call) && migrated.contains(call)
                     || isContainerWrite(site, call, parameter) && touchesChannel(flow.receiverReferences(index, call), summary(site, call).channel())) {
                 continue;
             }
             if (arguments[parameter].equals(Type.LONG_TYPE) || isMapComparison(site, call, parameter)) {
-                requireEncoder(site);
+                helper(TypeRule.Kind.ENCODE, site, parameter);
             } else {
                 problem("UNSUPPORTED_REFERENCE_USE", site, pathFor(value) + " <- argument of " + symbol(call));
             }
@@ -497,6 +543,10 @@ final class RepresentationSolver {
     }
 
     private RepresentationMigration.Rule helper(TypeRule.Kind kind, Site site) {
+        return helper(kind, site, -1);
+    }
+
+    private RepresentationMigration.Rule helper(TypeRule.Kind kind, Site site, int parameter) {
         List<RepresentationMigration.Rule> candidates = migration.rules().stream().filter(rule -> rule.kind() == kind).toList();
         if (candidates.size() != 1) {
             candidateProblem(candidates.isEmpty() ? "MISSING_" + kind + "_RULE" : "AMBIGUOUS_" + kind + "_RULE", site,
@@ -504,6 +554,7 @@ final class RepresentationSolver {
             return null;
         }
         checkHelperAccess(candidates.getFirst().helper(), site);
+        rules.put(new RuleUse(location(site), kind, parameter), candidates.getFirst());
         return candidates.getFirst();
     }
 
@@ -561,17 +612,19 @@ final class RepresentationSolver {
                     Migration target = target(call);
                     for (int parameter = 0; parameter < parameters.length; parameter++) {
                         int parameterIndex = parameter;
-                        boolean matchingTarget = target != null && migrations.stream().anyMatch(declaration ->
+                        boolean ownTarget = target != null && migrations.stream().anyMatch(declaration ->
                                 declaration.target().equals(target.original()) && declaration.parameter() == parameterIndex);
-                        if (!touches(flow.argument(index, call, parameter), migrated) && !matchingTarget) {
+                        boolean matchingTarget = target != null && target.representations().stream().anyMatch(declaration ->
+                                declaration.parameter() == parameterIndex);
+                        if (!touches(flow.argument(index, call, parameter), migrated) && !ownTarget) {
                             continue;
                         }
                         if (isContainerWrite(site, call, parameter) && touchesChannel(flow.receiverReferences(index, call), summary(site, call).channel())) {
                             continue;
                         }
-                        var encoder = matchingTarget ? null : helper(TypeRule.Kind.ENCODE, site);
+                        var encoder = matchingTarget ? null : helper(TypeRule.Kind.ENCODE, site, parameter);
                         MethodKey original = symbol(call);
-                        MethodKey replacement = matchingTarget
+                        MethodKey replacement = target != null
                                 ? new MethodKey(call.owner, call.name, target.implementation().descriptor()) : original;
                         arguments.add(new RepresentationPlan.Argument(location(site), original, replacement, parameter,
                                 representation, encoder == null ? null : accessibleHelper(encoder.helper(), site), migration.id()));
@@ -832,10 +885,14 @@ final class RepresentationSolver {
             RuleRequirement requirement = requirement(issue.code);
             String sourceType = originalType.getDescriptor();
             String targetType = migration.representation().getDescriptor();
-            diagnostics.add(new Diagnostic(issue.code, issue.site.method(), Math.max(-1, issue.site.index), issue.parameter,
+            Diagnostic diagnostic = new Diagnostic(issue.code, issue.site.method(), Math.max(-1, issue.site.index), issue.parameter,
                     issue.message, migration.id(), relevant, issue.candidates,
                     migration.target(), migration.parameter(), sourceType, targetType, requirement,
-                    dependencyPath(issue.site.point(), relevant), issue.site.symbol()));
+                    dependencyPath(issue.site.point(), relevant), issue.site.symbol());
+            List<ContainerContext> contexts = containerContexts().stream()
+                    .filter(context -> affected.contains(context.storage()) || context.access().equals(issue.site.point()))
+                    .toList();
+            diagnostics.add(diagnostic.withContainers(contexts));
         }
     }
 

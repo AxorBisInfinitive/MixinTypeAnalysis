@@ -114,7 +114,9 @@ public final class BytecodeFixtures {
             ClassNode mixin = ClassFiles.read(bytes);
             var annotation = ClassFiles.annotation(mixin.invisibleAnnotations, ClassFiles.MIXIN);
             var targets = (List<?>) ClassFiles.value(annotation, "value", List.of());
-            String owner = ((Type) targets.getFirst()).getInternalName();
+            String owner = targets.isEmpty()
+                    ? ((List<?>) ClassFiles.value(annotation, "targets", List.of())).getFirst().toString().replace('.', '/')
+                    : ((Type) targets.getFirst()).getInternalName();
             ClassNode target = ClassFiles.read(classes.get(owner));
             for (MethodNode method : mixin.methods) {
                 if (method.name.startsWith("<")) {
