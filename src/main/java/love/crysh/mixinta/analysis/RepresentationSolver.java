@@ -386,6 +386,9 @@ final class RepresentationSolver {
             if (summary.readsElement()) {
                 request(new SourceValue(1, use.call()), site.point(), DependencyKind.CONTAINER_READ);
             }
+            if (summary.observedParameter() >= 0) {
+                helper(TypeRule.Kind.ENCODE, site);
+            }
         }
         // 所有读取方都要跟随共享元素迁移，包含最终传入旧消费者的读取。
         for (Flow flow : flows) {
@@ -525,7 +528,7 @@ final class RepresentationSolver {
                     || isContainerWrite(call, parameter) && touchesStorage(flow.receiver(index, call))) {
                 continue;
             }
-            if (arguments[parameter].equals(Type.LONG_TYPE)) {
+            if (arguments[parameter].equals(Type.LONG_TYPE) || isMapComparison(call, parameter)) {
                 requireEncoder(site);
             } else {
                 problem("UNSUPPORTED_REFERENCE_USE", site, pathFor(value) + " <- argument of " + symbol(call));
@@ -570,6 +573,12 @@ final class RepresentationSolver {
                     edit(site, "remove-boxing", null);
                 } else if (isUnbox(call) && migrated.contains(call)) {
                     edit(site, "replace-unboxing", helper(TypeRule.Kind.READ, site));
+                } else if (isMigratedMapObservation(flow, index, call)) {
+                    var encoder = helper(TypeRule.Kind.ENCODE, site);
+                    edits.add(new RepresentationPlan.Edit(location(site), "observe-map-values", encoder.helper(),
+                            representation, TypeRule.Binding.RECEIVER,
+                            touches(flow.argument(index, call, 0), migrated) ? 1 : 0));
+                    changes.add(new PlanChange(flow.key, index, "observe-map-values", migration.id(), encoder.id()));
                 } else {
                     Type[] parameters = Type.getArgumentTypes(call.desc);
                     Migration target = target(call);
@@ -626,11 +635,41 @@ final class RepresentationSolver {
                 }
                 if (variable.signature != null && touchesStorage(value)) {
                     locals.add(new RepresentationPlan.Local(flow.key, local, variable.desc,
-                            variable.signature.replace("Ljava/lang/Long;", representation.getDescriptor())));
+                            storageSignature(variable.signature)));
                     break;
                 }
             }
         }
+    }
+
+    private String storageSignature(String signature) {
+        int open = signature.indexOf('<');
+        if (open < 0 || !ContainerSummary.mapOwner(signature.substring(1, open))) {
+            return signature.replace("Ljava/lang/Long;", representation.getDescriptor());
+        }
+        int start = open + 1;
+        int argument = 0;
+        int depth = 0;
+        for (int index = start; index < signature.length(); index++) {
+            char symbol = signature.charAt(index);
+            if (symbol == '<') depth++;
+            if (symbol == '>') depth--;
+            if (depth == 0 && (symbol == ';' || symbol == '*')) {
+                if (argument == 1) {
+                    String value = signature.substring(start, index + 1);
+                    if (value.equals("Ljava/lang/Long;") || value.equals("+Ljava/lang/Long;")
+                            || value.equals("-Ljava/lang/Long;")) {
+                        return signature.substring(0, start)
+                                + value.replace("Ljava/lang/Long;", representation.getDescriptor())
+                                + signature.substring(index + 1);
+                    }
+                    return signature;
+                }
+                argument++;
+                start = index + 1;
+            }
+        }
+        return signature;
     }
 
     private Migration target(MethodInsnNode call) {
@@ -652,6 +691,16 @@ final class RepresentationSolver {
     private static boolean isContainerWrite(MethodInsnNode call, int parameter) {
         ContainerSummary summary = ContainerSummary.resolve(call);
         return summary != null && summary.writesElement() && summary.elementParameter() == parameter;
+    }
+
+    private static boolean isMapComparison(MethodInsnNode call, int parameter) {
+        ContainerSummary summary = ContainerSummary.resolve(call);
+        return summary != null && (summary.keyParameter() == parameter || summary.observedParameter() == parameter);
+    }
+
+    private boolean isMigratedMapObservation(Flow flow, int index, MethodInsnNode call) {
+        ContainerSummary summary = ContainerSummary.resolve(call);
+        return summary != null && summary.observedParameter() >= 0 && touchesStorage(flow.receiver(index, call));
     }
 
     private static DependencyKind dependencyKind(ContainerOperation operation) {

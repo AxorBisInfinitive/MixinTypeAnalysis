@@ -124,7 +124,7 @@ class TypedOverwriteIT {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"direct", "queue", "list"})
+    @ValueSource(strings = {"direct", "queue", "list", "map"})
     void migratesReferenceRepresentationThroughRuntime(String scenario) throws Exception {
         String operation = switch (scenario) {
             case "queue" -> """
@@ -141,6 +141,16 @@ class TypedOverwriteIT {
                     list.clear();
                     if (!list.isEmpty()) throw new AssertionError();
                     return lookup(old);
+                    """;
+            case "map" -> """
+                    java.util.Map<Long, Long> map = new java.util.HashMap<>();
+                    Long value = new BlockPos(12).asLong();
+                    map.put(value, value);
+                    if (!map.containsKey(value) || !map.containsValue(value)) throw new AssertionError();
+                    int result = lookup(map.get(value));
+                    map.remove(value);
+                    if (!map.isEmpty()) throw new AssertionError();
+                    return result;
                     """;
             default -> "return lookup(new BlockPos(12).asLong());";
         };
@@ -161,14 +171,21 @@ class TypedOverwriteIT {
                         var node = new org.objectweb.asm.tree.ClassNode();
                         new org.objectweb.asm.ClassReader(outputs.get("love/crysh/exp/Subject")).accept(node, 0);
                         var run = node.methods.stream().filter(method -> method.name.equals("run")).findFirst().orElseThrow();
+                        boolean mapScenario = %s;
                         for (var instruction : run.instructions) {
                             if (instruction instanceof org.objectweb.asm.tree.MethodInsnNode call
-                                    && call.owner.equals("java/lang/Long")) throw new AssertionError(call.name);
+                                    && call.owner.equals("java/lang/Long")
+                                    && (call.name.equals("longValue") || !mapScenario)) {
+                                throw new AssertionError(call.name);
+                            }
+                        }
+                        if (mapScenario && node.methods.stream().noneMatch(method -> method.name.startsWith("mixinta$containsValue$"))) {
+                            throw new AssertionError("Missing value comparison helper");
                         }
                         System.out.println("REPRESENTATION_BYTECODE_VERIFIED");
                     }
                 }
-                """);
+                """.formatted(scenario.equals("map")));
         String body = """
                 @love.crysh.mixinta.TypedOverwrite(method="lookup(J)I", parameters=@love.crysh.mixinta.ParameterMigration(parameter=0, rules=SubjectMixin.class))
                 public static int lookup(love.crysh.exp.BlockPos value){return (int)value.value();}

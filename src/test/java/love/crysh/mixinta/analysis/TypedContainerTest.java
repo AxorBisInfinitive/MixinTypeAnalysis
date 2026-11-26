@@ -127,7 +127,7 @@ class TypedContainerTest {
         assertTrue(failure.diagnostics().stream().anyMatch(value -> value.code().equals("UNRESOLVED_CONTAINER")));
     }
 
-    private static BytecodeFixtures.Fixture fixture(String body) {
+    static BytecodeFixtures.Fixture fixture(String body) {
         return BytecodeFixtures.fixture("""
                 public static int sources;
                 public static BlockPos position(long value) { sources++; return new BlockPos(value); }
@@ -147,7 +147,7 @@ class TypedContainerTest {
                 """, Map.of("sample.BlockPos", "package sample; public record BlockPos(long value) { public long asLong() { return value; } }"));
     }
 
-    private static MethodNode run(Map<String, byte[]> classes) {
+    static MethodNode run(Map<String, byte[]> classes) {
         return ClassFiles.findMethod(ClassFiles.read(classes.get("sample/Subject")), "run", "(Z)J");
     }
 
@@ -156,7 +156,7 @@ class TypedContainerTest {
                 && call.owner.equals("java/lang/Long") && call.name.equals(name)).count();
     }
 
-    private static void assertEquivalent(Map<String, byte[]> original, Map<String, byte[]> output) throws Exception {
+    static void assertEquivalent(Map<String, byte[]> original, Map<String, byte[]> output) throws Exception {
         for (boolean flag : new boolean[]{true, false}) {
             assertEquals(execute(original, flag), execute(output, flag));
         }

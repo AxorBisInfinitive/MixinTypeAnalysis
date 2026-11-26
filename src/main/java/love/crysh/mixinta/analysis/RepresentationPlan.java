@@ -7,6 +7,8 @@ import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.InsnList;
 import org.objectweb.asm.tree.InsnNode;
+import org.objectweb.asm.tree.JumpInsnNode;
+import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
@@ -31,7 +33,7 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
 
     record Edit(Location location, String action, MethodKey helper, Type representation,
             TypeRule.Binding binding, int parameter) {
-        void apply(MethodNode method, AbstractInsnNode instruction) {
+        void apply(ClassNode owner, MethodNode method, AbstractInsnNode instruction) {
             switch (action) {
                 case "load-reference" -> method.instructions.set(instruction,
                         new VarInsnNode(Opcodes.ALOAD, ((VarInsnNode) instruction).var));
@@ -48,8 +50,60 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
                     call.desc = helper.descriptor();
                 }
                 case "replace-producer" -> replaceSource(method, (MethodInsnNode) instruction);
+                case "observe-map-values" -> observeMapValues(owner, method, (MethodInsnNode) instruction);
                 default -> throw new IllegalStateException("Unknown representation action " + action);
             }
+        }
+
+        private void observeMapValues(ClassNode owner, MethodNode method, MethodInsnNode invocation) {
+            String name = "mixinta$containsValue$" + location.instruction();
+            while (hasMethod(owner, name)) {
+                name += "$";
+            }
+            String descriptor = "(Ljava/util/Map;Ljava/lang/Object;)Z";
+            MethodNode observation = new MethodNode(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                    name, descriptor, null, null);
+            InsnList code = observation.instructions;
+            LabelNode loop = new LabelNode();
+            LabelNode absent = new LabelNode();
+            LabelNode found = new LabelNode();
+            code.add(new VarInsnNode(Opcodes.ALOAD, 0));
+            code.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE, "java/util/Map", "values", "()Ljava/util/Collection;", true));
+            code.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE, "java/util/Collection", "iterator", "()Ljava/util/Iterator;", true));
+            code.add(new VarInsnNode(Opcodes.ASTORE, 2));
+            code.add(loop);
+            code.add(new VarInsnNode(Opcodes.ALOAD, 2));
+            code.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE, "java/util/Iterator", "hasNext", "()Z", true));
+            code.add(new JumpInsnNode(Opcodes.IFEQ, absent));
+            code.add(new VarInsnNode(Opcodes.ALOAD, 1));
+            code.add(new VarInsnNode(Opcodes.ALOAD, 2));
+            code.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE, "java/util/Iterator", "next", "()Ljava/lang/Object;", true));
+            encodeBoxed(code, helper, representation);
+            code.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/util/Objects", "equals", "(Ljava/lang/Object;Ljava/lang/Object;)Z", false));
+            code.add(new JumpInsnNode(Opcodes.IFNE, found));
+            code.add(new JumpInsnNode(Opcodes.GOTO, loop));
+            code.add(absent);
+            code.add(new InsnNode(Opcodes.ICONST_0));
+            code.add(new InsnNode(Opcodes.IRETURN));
+            code.add(found);
+            code.add(new InsnNode(Opcodes.ICONST_1));
+            code.add(new InsnNode(Opcodes.IRETURN));
+            observation.maxLocals = 3;
+            owner.methods.add(observation);
+            if (parameter == 1) {
+                InsnList conversion = new InsnList();
+                encodeBoxed(conversion, helper, representation);
+                method.instructions.insertBefore(invocation, conversion);
+            }
+            invocation.setOpcode(Opcodes.INVOKESTATIC);
+            invocation.owner = owner.name;
+            invocation.name = name;
+            invocation.desc = descriptor;
+            invocation.itf = false;
+        }
+
+        private static boolean hasMethod(ClassNode owner, String name) {
+            return owner.methods.stream().anyMatch(method -> method.name.equals(name));
         }
 
         private void replaceSource(MethodNode method, MethodInsnNode invocation) {
@@ -100,7 +154,7 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
         for (Edit edit : edits) {
             MethodKey key = edit.location.method;
             MethodNode method = ClassFiles.findMethod(nodes.get(key.owner()), key.name(), key.descriptor());
-            edit.apply(method, instructions.get(key)[edit.location.instruction]);
+            edit.apply(nodes.get(key.owner()), method, instructions.get(key)[edit.location.instruction]);
         }
         Map<Location, List<Argument>> grouped = new java.util.LinkedHashMap<>();
         for (Argument argument : arguments) {
@@ -132,7 +186,11 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
                 int parameterIndex = index;
                 Argument argument = entry.getValue().stream().filter(value -> value.parameter() == parameterIndex).findFirst().orElse(null);
                 if (argument != null && argument.encoder() != null) {
-                    conversion.add(invoke(argument.encoder()));
+                    if (original[index].getSort() == Type.OBJECT) {
+                        encodeBoxed(conversion, argument.encoder(), argument.representation());
+                    } else {
+                        conversion.add(invoke(argument.encoder()));
+                    }
                 }
             }
             method.instructions.insertBefore(invocation, conversion);
@@ -147,6 +205,17 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
             variable.desc = local.descriptor;
             variable.signature = local.signature;
         }
+    }
+
+    /** 保留 Map 的 null key 和 null value，非空表示通过编码恢复 Long 比较语义。 */
+    private static void encodeBoxed(InsnList code, MethodKey encoder, Type representation) {
+        LabelNode end = new LabelNode();
+        code.add(new InsnNode(Opcodes.DUP));
+        code.add(new JumpInsnNode(Opcodes.IFNULL, end));
+        code.add(new TypeInsnNode(Opcodes.CHECKCAST, representation.getInternalName()));
+        code.add(invoke(encoder));
+        code.add(new MethodInsnNode(Opcodes.INVOKESTATIC, "java/lang/Long", "valueOf", "(J)Ljava/lang/Long;", false));
+        code.add(end);
     }
 
     static MethodInsnNode invoke(MethodKey key) {
