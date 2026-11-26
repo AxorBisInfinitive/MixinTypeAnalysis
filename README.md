@@ -67,6 +67,10 @@ public class ExampleMixin {
 
 局部 `HashMap` 和 `LinkedHashMap` 支持 `put`、`get`、`remove`、`containsKey`、`containsValue`、`size`、`isEmpty` 和 `clear`。value 独立传播新表示，key 保持原存储表示，已迁移值用作 key 时通过 `ENCODE` 恢复为 Long。`containsValue` 通过生成的编码比较方法保持旧表示的查询行为，相关查询需要 `ENCODE` 规则。
 
+迭代器和视图保存根容器身份、元素通道和引用种类。支持 `iterator`、`descendingIterator`、`listIterator`、`subList`、List 与 Deque 的 `reversed`，以及 Map 的 `values`、`keySet` 和 `entrySet`。`Iterator.next`、`ListIterator.previous` 和写入操作关联到根存储，`Map.Entry.getValue`、`setValue` 传播 value 表示，`getKey` 保留原 key 表示。增强 for 循环通过普通迭代器链处理，派生引用可通过方法参数、返回值和递归传播。
+
+视图上的 `contains` 和 `remove(Object)` 使用编码后的旧表示比较，remove 通过原迭代器删除第一个匹配元素。keySet 的查询和迭代保留 Long。原迭代器、视图和 Entry 继续执行状态检查、区间检查和 fail-fast 检查，拆箱位置继续使用 READ。Entry 和嵌套迭代器的泛型调试信息只改写 value。视图逃逸、来源不明、Entry 与普通元素迭代器合流、Map key 物理迁移、回调及未建模操作会形成诊断。当前支持范围包含上述标准操作，自定义容器摘要、stream、spliterator、bulk 操作和包装容器仍待实现。
+
 容器引用按指令位置、局部槽和操作数栈位置建立显式别名事实，保留全部可能的分配位置、未知来源和 null。局部赋值、引用 cast、分支、循环、异常路径和栈复制共享对应存储约束，局部槽复用按各自生命周期处理。固定批次中的普通调用通过方法摘要绑定 receiver、实参和返回来源，支持容器工厂、参数转发、递归和相互递归。字段、数组读取和缺少实现的工厂返回仍作为未知来源参与检查。
 
 容器访问按分配位置汇总 `LOCAL`、`UNKNOWN` 和 `ESCAPED` 状态。未覆盖的返回、字段或数组写入、动态捕获生成逃逸约束，缺少实现或派发覆盖的调用生成未知访问约束。批次内部返回可传递存储身份，callee 内的逃逸效果会关联到实际传入的存储。诊断包含受影响存储、元素通道、调用参数和传播路径，同一调用中的多个容器参数分别报告。访问时序和 `clear` 都服从分配点统一表示模型。容器对象的同步块保留原有锁和空引用行为。

@@ -36,6 +36,7 @@ final class ContainerCallGraph {
     private final Map<MethodKey, ContainerMethodAnalyzer> analyzers = new LinkedHashMap<>();
     private final Map<MethodKey, MethodContainerSummary> summaries = new LinkedHashMap<>();
     private final Map<ProgramPoint, MethodContainerSummary.Call> calls = new LinkedHashMap<>();
+    private final Map<ProgramPoint, MethodContainerSummary.Call> derived = new LinkedHashMap<>();
     private final Map<ProgramPoint, Set<MethodKey>> potential = new LinkedHashMap<>();
     private final Map<Binding, StorageReferences> inputs = new LinkedHashMap<>();
     private final Map<ProgramPoint, StorageReferences> results = new LinkedHashMap<>();
@@ -68,6 +69,10 @@ final class ContainerCallGraph {
                     if (isReference(Type.getReturnType(call.target().descriptor()))) {
                         results.put(call.point(), EMPTY);
                     }
+                } else if (call.intrinsic().view() != null || call.target().owner().equals("java/util/Iterator")
+                        && call.target().name().equals("next")) {
+                    derived.put(call.point(), call);
+                    results.put(call.point(), EMPTY);
                 }
             }
         }
@@ -154,6 +159,21 @@ final class ContainerCallGraph {
                     }
                 }
             }
+            for (var call : derived.values()) {
+                StorageReferences receiver = resolve(call.point().method(), call.receiver());
+                StorageReferences returned = EMPTY;
+                if (!empty(receiver)) {
+                    ContainerView view = call.intrinsic().view();
+                    if (view == null) view = ContainerView.ENTRY;
+                    returned = view.derive(receiver, call.point());
+                }
+                StorageReferences previous = results.get(call.point());
+                StorageReferences next = join(previous, returned);
+                if (!previous.equals(next)) {
+                    results.put(call.point(), next);
+                    changed = true;
+                }
+            }
         } while (changed);
     }
 
@@ -174,7 +194,8 @@ final class ContainerCallGraph {
         StorageReferences result = new StorageReferences(Set.of(), Set.of(), value.nullable());
         for (var origin : value.origins()) {
             StorageReferences reference = switch (origin) {
-                case MethodContainerSummary.Allocation allocation -> new StorageReferences(Set.of(allocation.storage()), Set.of(), false);
+                case MethodContainerSummary.Allocation allocation -> new StorageReferences(Set.of(new ContainerReference(
+                        allocation.storage(), -1, ContainerReference.Kind.ROOT)), Set.of(), false);
                 case MethodContainerSummary.Parameter parameter -> inputs.getOrDefault(new Binding(method, parameter.index()), EMPTY);
                 case MethodContainerSummary.Receiver ignored -> inputs.getOrDefault(new Binding(method, -1), EMPTY);
                 case MethodContainerSummary.Producer producer -> results.getOrDefault(producer.point(), unknown(producer.point()));
@@ -212,8 +233,10 @@ final class ContainerCallGraph {
         StorageReferences receiver = resolve(call.point().method(), call.receiver());
         if (empty(receiver)) return new Dispatch(Set.of(), false, true, "receiver pending");
         Set<String> types = new LinkedHashSet<>();
-        for (StorageId storage : receiver.storages()) types.add(Type.getType(storage.descriptor()).getInternalName());
-        boolean precise = true;
+        for (ContainerReference reference : receiver.references()) {
+            if (reference.kind() == ContainerReference.Kind.ROOT) types.add(Type.getType(reference.storage().descriptor()).getInternalName());
+        }
+        boolean precise = receiver.references().stream().allMatch(reference -> reference.kind() == ContainerReference.Kind.ROOT);
         for (ProgramPoint origin : receiver.unknownOrigins()) {
             MethodFlow flow = flows.get(origin.method());
             if (flow != null && origin.instruction() >= 0
@@ -310,6 +333,9 @@ final class ContainerCallGraph {
 
     List<PropagationEdge> dependencies() {
         Set<PropagationEdge> edges = new LinkedHashSet<>();
+        for (var call : derived.values()) {
+            originEdges(edges, call.point(), call.point().method(), call.receiver(), DependencyKind.CONTAINER_VIEW);
+        }
         for (var call : calls.values()) {
             for (MethodKey target : dispatch(call).targets()) {
                 if (!body(target)) continue;
@@ -374,10 +400,10 @@ final class ContainerCallGraph {
     }
 
     private static StorageReferences join(StorageReferences first, StorageReferences second) {
-        Set<StorageId> storages = new LinkedHashSet<>(first.storages());
-        storages.addAll(second.storages());
+        Set<ContainerReference> references = new LinkedHashSet<>(first.references());
+        references.addAll(second.references());
         Set<ProgramPoint> unknown = new LinkedHashSet<>(first.unknownOrigins());
         unknown.addAll(second.unknownOrigins());
-        return new StorageReferences(storages, unknown, first.nullable() || second.nullable());
+        return new StorageReferences(references, unknown, first.nullable() || second.nullable());
     }
 }

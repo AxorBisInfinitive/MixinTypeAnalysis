@@ -51,17 +51,19 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
                     call.desc = helper.descriptor();
                 }
                 case "replace-producer" -> replaceSource(method, (MethodInsnNode) instruction);
-                case "observe-map-values" -> observeMapValues(owner, method, (MethodInsnNode) instruction);
+                case "observe-map-values", "observe-view-elements" -> observeElements(owner, method, (MethodInsnNode) instruction);
                 default -> throw new IllegalStateException("Unknown representation action " + action);
             }
         }
 
-        private void observeMapValues(ClassNode owner, MethodNode method, MethodInsnNode invocation) {
-            String name = "mixinta$containsValue$" + location.instruction();
+        private void observeElements(ClassNode owner, MethodNode method, MethodInsnNode invocation) {
+            boolean map = ContainerSummary.mapOwner(invocation.owner);
+            boolean remove = invocation.name.equals("remove");
+            String name = "mixinta$" + invocation.name + "$" + location.instruction();
             while (hasMethod(owner, name)) {
                 name += "$";
             }
-            String descriptor = "(Ljava/util/Map;Ljava/lang/Object;)Z";
+            String descriptor = map ? "(Ljava/util/Map;Ljava/lang/Object;)Z" : "(Ljava/util/Collection;Ljava/lang/Object;)Z";
             MethodNode observation = new MethodNode(Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
                     name, descriptor, null, null);
             InsnList code = observation.instructions;
@@ -69,7 +71,7 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
             LabelNode absent = new LabelNode();
             LabelNode found = new LabelNode();
             code.add(new VarInsnNode(Opcodes.ALOAD, 0));
-            code.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE, "java/util/Map", "values", "()Ljava/util/Collection;", true));
+            if (map) code.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE, "java/util/Map", "values", "()Ljava/util/Collection;", true));
             code.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE, "java/util/Collection", "iterator", "()Ljava/util/Iterator;", true));
             code.add(new VarInsnNode(Opcodes.ASTORE, 2));
             code.add(loop);
@@ -87,6 +89,10 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
             code.add(new InsnNode(Opcodes.ICONST_0));
             code.add(new InsnNode(Opcodes.IRETURN));
             code.add(found);
+            if (remove) {
+                code.add(new VarInsnNode(Opcodes.ALOAD, 2));
+                code.add(new MethodInsnNode(Opcodes.INVOKEINTERFACE, "java/util/Iterator", "remove", "()V", true));
+            }
             code.add(new InsnNode(Opcodes.ICONST_1));
             code.add(new InsnNode(Opcodes.IRETURN));
             observation.maxLocals = 3;

@@ -301,6 +301,105 @@ class TypedOverwriteIT {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"list", "values", "entries"})
+    void migratesContainerViewsThroughRuntime(String scenario) throws Exception {
+        String operation = switch (scenario) {
+            case "list" -> """
+                    java.util.List<Long> list = new java.util.ArrayList<>();
+                    list.add(new BlockPos(12).asLong()); list.add(new BlockPos(3).asLong());
+                    java.util.List<Long> view = list.subList(0, 2).reversed();
+                    java.util.ListIterator<Long> it = view.listIterator();
+                    it.next(); it.set(new BlockPos(7).asLong());
+                    if (!view.contains(7L) || !view.remove(7L)) throw new AssertionError();
+                    return read(view.iterator(), 3);
+                    """;
+            case "values" -> """
+                    java.util.Map<Long, Long> map = new java.util.LinkedHashMap<>();
+                    map.put(1L, new BlockPos(12).asLong()); map.put(2L, new BlockPos(3).asLong());
+                    java.util.Collection<Long> values = map.values();
+                    if (!values.contains(3L) || !values.remove(3L)) throw new AssertionError();
+                    return read(values.iterator(), 3);
+                    """;
+            default -> """
+                    java.util.Map<Long, Long> map = new java.util.LinkedHashMap<>();
+                    map.put(1L, new BlockPos(3).asLong());
+                    java.util.Map.Entry<Long, Long> entry = first(map.entrySet().iterator());
+                    entry.setValue(new BlockPos(12).asLong());
+                    if (entry.getKey() != 1L) throw new AssertionError();
+                    return Subject.lookup(entry.getValue());
+                    """;
+        };
+        Map<String, String> app = new LinkedHashMap<>();
+        app.put("love.crysh.exp.BlockPos", "package love.crysh.exp; public record BlockPos(long value) { public long asLong(){return value;} }");
+        app.put(SUBJECT, "package love.crysh.exp; public final class Subject { public static int lookup(long value){return (int)value;} }");
+        String helpers = scenario.equals("entries") ? """
+                public static java.util.Map.Entry<Long, Long> first(java.util.Iterator<java.util.Map.Entry<Long, Long>> it) { return it.next(); }
+                """ : """
+                public static int read(java.util.Iterator<Long> it, int depth) {
+                    return depth == 0 ? Subject.lookup(it.next()) : read(it, depth - 1);
+                }
+                """;
+        app.put("other.Worker", "package other; import love.crysh.exp.BlockPos; import love.crysh.exp.Subject; public final class Worker { public static int run(){"
+                + operation + "}" + helpers + "}");
+        app.put("love.crysh.exp.Main", """
+                package love.crysh.exp;
+                public final class Main {
+                    public static void main(String[] args) throws Exception {
+                        System.out.println("BUSINESS_EXECUTED");
+                        if (other.Worker.run() != 12) throw new AssertionError();
+                        Subject.class.getDeclaredMethod("lookup", BlockPos.class);
+                        var field = love.crysh.mixinta.runtime.TypedOverwriteRuntime.class.getDeclaredField("outputs");
+                        field.setAccessible(true);
+                        var outputs = (java.util.Map<String, byte[]>) field.get(null);
+                        var worker = new org.objectweb.asm.tree.ClassNode();
+                        new org.objectweb.asm.ClassReader(outputs.get("other/Worker")).accept(worker, 0);
+                        int unboxing = 0;
+                        int sourceCalls = 0;
+                        boolean adapted = false;
+                        for (var method : worker.methods) {
+                            for (var instruction : method.instructions) {
+                                if (instruction instanceof org.objectweb.asm.tree.MethodInsnNode call) {
+                                    if (call.owner.equals("java/lang/Long") && call.name.equals("longValue")) unboxing++;
+                                    if (call.owner.equals("love/crysh/exp/BlockPos") && call.name.equals("asLong")) sourceCalls++;
+                                    if (call.name.equals("lookup") && call.desc.equals("(Llove/crysh/exp/BlockPos;)I")) adapted = true;
+                                }
+                            }
+                        }
+                        if (unboxing != %d || sourceCalls != 0 || !adapted) throw new AssertionError("Unadapted view operations");
+                        System.out.println("VIEW_BYTECODE_VERIFIED");
+                        System.out.println("RESULT=12");
+                    }
+                }
+                """.formatted(scenario.equals("entries") ? 1 : 0));
+        Result result = launch(app, Map.of("SubjectMixin", mixin("SubjectMixin", 1000, REFERENCE_MIXIN)), List.of());
+        result.success();
+        result.contains("RESULT=12", "VIEW_BYTECODE_VERIFIED");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"values", "entry"})
+    void rejectsEscapingContainerViewsBeforeBusinessStarts(String scenario) throws Exception {
+        Map<String, String> app = new LinkedHashMap<>();
+        app.put("love.crysh.exp.BlockPos", "package love.crysh.exp; public record BlockPos(long value) { public long asLong(){return value;} }");
+        app.put(SUBJECT, """
+                package love.crysh.exp;
+                public final class Subject {
+                    public static Object saved;
+                    public static int lookup(long value){return (int)value;}
+                    public static int run(){
+                        java.util.Map<Long, Long> map = new java.util.HashMap<>();
+                        map.put(1L, new BlockPos(12).asLong());
+                        saved = %s;
+                        return lookup(map.get(1L));
+                    }
+                }
+                """.formatted(scenario.equals("values") ? "map.values().iterator()" : "map.entrySet().iterator().next()"));
+        app.put("love.crysh.exp.Main", "package love.crysh.exp; public final class Main { public static void main(String[] args){System.out.println(\"BUSINESS_EXECUTED\");System.out.println(Subject.run());} }");
+        Result result = launch(app, Map.of("SubjectMixin", mixin("SubjectMixin", 1000, REFERENCE_MIXIN)), List.of());
+        result.failure("ESCAPED_CONTAINER", "channels=[1]", "lookup", "HashMap");
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"field", "array", "call", "capture"})
     void rejectsUncoveredContainerEffectsBeforeBusinessStarts(String scenario) throws Exception {
         String operation = switch (scenario) {
