@@ -14,7 +14,4 @@ public @interface ParameterMigration {
 
     /** 同一身份关联同一批次中兼容的表示迁移，默认身份由目标参数生成。 */
     String id() default "";
-
-    /** 启用局部分配 ArrayDeque 的 add、poll、size、isEmpty 和无参构造摘要。 */
-    boolean arrayDeque() default false;
 }

@@ -87,7 +87,7 @@ class RepresentationPropagationTest {
         Fixture fixture = fixture("long pos = position(a).asLong(); return lookup(pos);",
                 "BlockPos pos = Rules.keep(position(a)); return lookup(pos);");
         Map<String, byte[]> snapshot = ClassFiles.snapshot(fixture.original);
-        var missing = new RepresentationPropagationExperiment.Rules(TARGET, IMPLEMENTATION, List.of(), KEEP, ENCODE, true);
+        var missing = new RepresentationPropagationExperiment.Rules(TARGET, IMPLEMENTATION, List.of(), KEEP, ENCODE);
         var failure = assertThrows(TypedOverwriteException.class, () -> fixture.transform(missing));
         assertDiagnostic(failure, "MISSING_PRODUCER_RULE", "lookup", "asLong");
         snapshot.forEach((name, bytes) -> assertArrayEquals(bytes, fixture.original.get(name)));
@@ -154,7 +154,7 @@ class RepresentationPropagationTest {
                 long pos = position(a).asLong();
                 return lookup(pos) + legacy(1,pos,2.5,pos,3);
                 """, "return lookup(Rules.keep(position(a)));");
-        var missing = new RepresentationPropagationExperiment.Rules(TARGET, IMPLEMENTATION, List.of(PRODUCER), KEEP, null, true);
+        var missing = new RepresentationPropagationExperiment.Rules(TARGET, IMPLEMENTATION, List.of(PRODUCER), KEEP, null);
         var failure = assertThrows(TypedOverwriteException.class, () -> fixture.transform(missing));
         assertDiagnostic(failure, "MISSING_BOUNDARY_CONVERSION", "run", "Legacy");
     }
@@ -203,6 +203,27 @@ class RepresentationPropagationTest {
                 && variable.signature.equals("Ljava/util/Queue<" + POSITION + ">;")));
         assertTrue(result.changes().stream().anyMatch(change -> change.action().equals("remove-boxing")));
         assertTrue(result.changes().stream().anyMatch(change -> change.action().equals("replace-unboxing")));
+    }
+
+    @Test
+    void experiment3MigratesListWriteAndIndexedRead() throws Exception {
+        Fixture fixture = listFixture("""
+                list.add(position(a).asLong());
+                long next = list.get(0);
+                return lookup(next);
+                """, """
+                list.add(Rules.keep(position(a)));
+                BlockPos next = Rules.keep(list.get(0));
+                return lookup(next);
+                """);
+        var result = fixture.transform(rules());
+        assertMatches(fixture, result);
+        MethodNode run = run(result.classes());
+        assertTrue(calls(run, new MethodKey("java/util/List", "get", "(I)Ljava/lang/Object;")));
+        assertFalse(calls(run, new MethodKey("java/lang/Long", "valueOf", "(J)Ljava/lang/Long;")));
+        assertFalse(calls(run, new MethodKey("java/lang/Long", "longValue", "()J")));
+        assertTrue(Arrays.stream(run.instructions.toArray()).anyMatch(instruction -> instruction instanceof TypeInsnNode cast
+                && cast.getOpcode() == Opcodes.CHECKCAST && cast.desc.equals("sample/BlockPos")));
     }
 
     @Test
@@ -256,15 +277,6 @@ class RepresentationPropagationTest {
         assertMatches(fixture, result);
         assertEquals(1, invocationCount(run(result.classes()), new MethodKey("java/lang/Long", "valueOf", "(J)Ljava/lang/Long;")));
         assertEquals(1, invocationCount(run(result.classes()), new MethodKey("java/lang/Long", "longValue", "()J")));
-    }
-
-    @Test
-    void experiment3ReportsMissingQueueSummary() {
-        Fixture fixture = queueFixture("queue.add(position(a).asLong()); return lookup(queue.poll());",
-                "queue.add(Rules.keep(position(a))); return lookup(Rules.keep(queue.poll()));");
-        var missing = new RepresentationPropagationExperiment.Rules(TARGET, IMPLEMENTATION, List.of(PRODUCER), KEEP, ENCODE, false);
-        var failure = assertThrows(TypedOverwriteException.class, () -> fixture.transform(missing));
-        assertDiagnostic(failure, "MISSING_CONTAINER_SUMMARY", "lookup", "poll");
     }
 
     @Test
@@ -403,11 +415,16 @@ class RepresentationPropagationTest {
     }
 
     private static RepresentationPropagationExperiment.Rules rules() {
-        return new RepresentationPropagationExperiment.Rules(TARGET, IMPLEMENTATION, List.of(PRODUCER), KEEP, ENCODE, true);
+        return new RepresentationPropagationExperiment.Rules(TARGET, IMPLEMENTATION, List.of(PRODUCER), KEEP, ENCODE);
     }
 
     private static Fixture queueFixture(String original, String expected) {
         String declaration = "java.util.Queue<%s> queue = new java.util.ArrayDeque<>();\n";
+        return fixture(declaration.formatted("Long") + original, declaration.formatted("BlockPos") + expected);
+    }
+
+    private static Fixture listFixture(String original, String expected) {
+        String declaration = "java.util.List<%s> list = new java.util.ArrayList<>();\n";
         return fixture(declaration.formatted("Long") + original, declaration.formatted("BlockPos") + expected);
     }
 

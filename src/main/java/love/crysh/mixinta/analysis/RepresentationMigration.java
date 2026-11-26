@@ -6,7 +6,7 @@ import love.crysh.mixinta.TypeRule;
 import java.util.List;
 
 record RepresentationMigration(String id, MethodKey target, int parameter, Type representation,
-        String rulesOwner, List<Rule> rules, boolean arrayDeque) {
+        String rulesOwner, List<Rule> rules) {
     RepresentationMigration {
         rules = List.copyOf(rules);
     }

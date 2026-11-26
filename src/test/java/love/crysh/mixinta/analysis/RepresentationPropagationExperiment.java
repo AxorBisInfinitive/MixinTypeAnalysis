@@ -36,7 +36,7 @@ import java.util.Map;
 import java.util.Set;
 
 /**
- * 实验覆盖方法内 long 值传播和局部分配的 ArrayDeque 元素迁移。
+ * 实验覆盖方法内 long 值传播和局部分配容器的元素迁移。
  * 规则由测试注册，结果通过独立 ClassLoader 执行后与人工目标对照。
  */
 final class RepresentationPropagationExperiment {
@@ -44,7 +44,7 @@ final class RepresentationPropagationExperiment {
     }
 
     record Rules(MethodKey target, MethodKey implementation, List<Producer> producers,
-            MethodKey requireNonNull, MethodKey encode, boolean queueSummary) {
+            MethodKey requireNonNull, MethodKey encode) {
         Rules {
             producers = List.copyOf(producers);
         }
@@ -291,13 +291,9 @@ final class RepresentationPropagationExperiment {
                 } else if (isUnbox(call)) {
                     migrated.add(origin);
                     request(site.flow.receiver(site.index, call), demand.path + " <- Long.longValue at " + site.describe());
-                } else if (isPoll(call)) {
-                    if (!rules.queueSummary) {
-                        problem("MISSING_CONTAINER_SUMMARY", site, demand.path + " <- " + symbol(call));
-                    } else {
-                        migrated.add(origin);
-                        requireStorage(site.flow.receiver(site.index, call), demand.path + " <- poll at " + site.describe());
-                    }
+                } else if (isContainerRead(call)) {
+                    migrated.add(origin);
+                    requireStorage(site.flow.receiver(site.index, call), demand.path + " <- poll at " + site.describe());
                 } else {
                     problem("MISSING_PRODUCER_RULE", site, demand.path + " <- " + symbol(call));
                 }
@@ -310,7 +306,7 @@ final class RepresentationPropagationExperiment {
     private void requireStorage(SourceValue value, String path) {
         for (AbstractInsnNode origin : ordered(value.insns)) {
             if (origin instanceof TypeInsnNode allocation && allocation.getOpcode() == Opcodes.NEW
-                    && allocation.desc.equals("java/util/ArrayDeque")) {
+                    && ContainerSummary.supportsAllocation(allocation.desc)) {
                 if (storages.add(origin)) {
                     paths.put(origin, path);
                 }
@@ -332,10 +328,14 @@ final class RepresentationPropagationExperiment {
                     continue;
                 }
                 String path = storagePath(receiver) + " <- " + call.name + " at " + new Site(flow, index).describe();
-                if (isAdd(call)) {
+                ContainerSummary summary = ContainerSummary.resolve(call);
+                if (summary == null) {
+                    continue;
+                }
+                if (isContainerWrite(call)) {
                     requireStorage(receiver, path);
-                    request(flow.argument(index, call, 0), path);
-                } else if (isPoll(call)) {
+                    request(flow.argument(index, call, summary.elementParameter()), path);
+                } else if (isContainerRead(call)) {
                     requireStorage(receiver, path);
                     request(new SourceValue(1, call), path);
                 }
@@ -431,7 +431,7 @@ final class RepresentationPropagationExperiment {
         Flow flow = site.flow;
         int index = site.index;
         boolean receiverPresent = call.getOpcode() != Opcodes.INVOKESTATIC;
-        if (receiverPresent && touches(flow.receiver(index, call), storages) && !isAllowedQueueCall(call)) {
+        if (receiverPresent && touches(flow.receiver(index, call), storages) && ContainerSummary.resolve(call) == null) {
             problem("UNKNOWN_CONTAINER_USE", site, storagePath(flow.receiver(index, call)) + " <- " + symbol(call));
         }
         if (receiverPresent && touches(flow.receiver(index, call), migrated)
@@ -448,7 +448,8 @@ final class RepresentationPropagationExperiment {
                 continue;
             }
             if (is(call, rules.target) || isBox(call) && migrated.contains(call)
-                    || isAdd(call) && touches(flow.receiver(index, call), storages)) {
+                    || isContainerWrite(call) && ContainerSummary.resolve(call).elementParameter() == parameter
+                    && touches(flow.receiver(index, call), storages)) {
                 continue;
             }
             if (arguments[parameter].equals(Type.LONG_TYPE)) {
@@ -638,23 +639,14 @@ final class RepresentationPropagationExperiment {
         return rules.producers.stream().filter(rule -> is(call, rule.original)).findFirst().orElse(null);
     }
 
-    private boolean isAllowedQueueCall(MethodInsnNode call) {
-        return rules.queueSummary && (isAdd(call) || isPoll(call)
-                || queueOwner(call.owner) && call.name.equals("isEmpty") && call.desc.equals("()Z")
-                || queueOwner(call.owner) && call.name.equals("size") && call.desc.equals("()I")
-                || call.owner.equals("java/util/ArrayDeque") && call.name.equals("<init>") && call.desc.equals("()V"));
+    private static boolean isContainerWrite(MethodInsnNode call) {
+        ContainerSummary summary = ContainerSummary.resolve(call);
+        return summary != null && summary.writesElement();
     }
 
-    private static boolean queueOwner(String owner) {
-        return owner.equals("java/util/Queue") || owner.equals("java/util/Deque") || owner.equals("java/util/ArrayDeque");
-    }
-
-    private static boolean isAdd(MethodInsnNode call) {
-        return queueOwner(call.owner) && call.name.equals("add") && call.desc.equals("(Ljava/lang/Object;)Z");
-    }
-
-    private static boolean isPoll(MethodInsnNode call) {
-        return queueOwner(call.owner) && call.name.equals("poll") && call.desc.equals("()Ljava/lang/Object;");
+    private static boolean isContainerRead(MethodInsnNode call) {
+        ContainerSummary summary = ContainerSummary.resolve(call);
+        return summary != null && summary.readsElement();
     }
 
     private static boolean isBox(MethodInsnNode call) {

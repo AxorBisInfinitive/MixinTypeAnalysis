@@ -123,13 +123,52 @@ class TypedOverwriteIT {
         result.contains("RESULT=25");
     }
 
-    @Test
-    void migratesReferenceRepresentationThroughRuntime() throws Exception {
+    @ParameterizedTest
+    @ValueSource(strings = {"direct", "queue", "list"})
+    void migratesReferenceRepresentationThroughRuntime(String scenario) throws Exception {
+        String operation = switch (scenario) {
+            case "queue" -> """
+                    java.util.Deque<Long> queue = new java.util.ArrayDeque<>();
+                    queue.offerFirst(new BlockPos(12).asLong());
+                    if (queue.isEmpty() || queue.size() != 1) throw new AssertionError();
+                    return lookup(queue.removeLast());
+                    """;
+            case "list" -> """
+                    java.util.List<Long> list = new java.util.ArrayList<>();
+                    list.add(new BlockPos(12).asLong());
+                    long old = list.set(0, new BlockPos(3).asLong());
+                    if (lookup(list.get(0)) != 3) throw new AssertionError();
+                    list.clear();
+                    if (!list.isEmpty()) throw new AssertionError();
+                    return lookup(old);
+                    """;
+            default -> "return lookup(new BlockPos(12).asLong());";
+        };
         Map<String, String> app = new LinkedHashMap<>();
         app.put("love.crysh.exp.BlockPos", "package love.crysh.exp; public record BlockPos(long value) { public long asLong(){return value;} }");
-        app.put("love.crysh.exp.Subject", "package love.crysh.exp; public final class Subject { public static int lookup(long value){return (int)value;} public static int run(){return lookup(new BlockPos(12).asLong());} }");
+        app.put("love.crysh.exp.Subject", "package love.crysh.exp; public final class Subject { public static int lookup(long value){return (int)value;} public static int run(){" + operation + "} }");
         app.put("love.crysh.exp.Caller", "package love.crysh.exp; public class Caller {public static int run(){return Subject.run();}}");
-        app.put("love.crysh.exp.Main", "package love.crysh.exp; public final class Main {public static void main(String[] args) throws Exception {System.out.println(\"BUSINESS_EXECUTED\");System.out.println(\"RESULT=\" + Caller.run());}}");
+        app.put("love.crysh.exp.Main", """
+                package love.crysh.exp;
+                public final class Main {
+                    public static void main(String[] args) throws Exception {
+                        System.out.println("BUSINESS_EXECUTED");
+                        System.out.println("RESULT=" + Caller.run());
+                        Subject.class.getDeclaredMethod("lookup", BlockPos.class);
+                        var field = love.crysh.mixinta.runtime.TypedOverwriteRuntime.class.getDeclaredField("outputs");
+                        field.setAccessible(true);
+                        var outputs = (java.util.Map<String, byte[]>) field.get(null);
+                        var node = new org.objectweb.asm.tree.ClassNode();
+                        new org.objectweb.asm.ClassReader(outputs.get("love/crysh/exp/Subject")).accept(node, 0);
+                        var run = node.methods.stream().filter(method -> method.name.equals("run")).findFirst().orElseThrow();
+                        for (var instruction : run.instructions) {
+                            if (instruction instanceof org.objectweb.asm.tree.MethodInsnNode call
+                                    && call.owner.equals("java/lang/Long")) throw new AssertionError(call.name);
+                        }
+                        System.out.println("REPRESENTATION_BYTECODE_VERIFIED");
+                    }
+                }
+                """);
         String body = """
                 @love.crysh.mixinta.TypedOverwrite(method="lookup(J)I", parameters=@love.crysh.mixinta.ParameterMigration(parameter=0, rules=SubjectMixin.class))
                 public static int lookup(love.crysh.exp.BlockPos value){return (int)value.value();}
@@ -142,7 +181,7 @@ class TypedOverwriteIT {
                 """;
         Result result = launch(app, Map.of("SubjectMixin", mixin("SubjectMixin", 1000, body)), List.of());
         result.success();
-        result.contains("RESULT=12");
+        result.contains("RESULT=12", "REPRESENTATION_BYTECODE_VERIFIED");
     }
 
     @ParameterizedTest

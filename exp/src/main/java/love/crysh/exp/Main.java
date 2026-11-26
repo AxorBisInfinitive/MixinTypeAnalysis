@@ -7,14 +7,12 @@ public final class Main {
     private Main() {
     }
 
-    private static final int X = 12;
-    private static final int Y = 3;
-    private static final int Z = 4;
-
     public static void main(String[] args) {
-        int r1 = add(X, Y);
-        int r2 = div(r1, Z);
-        System.out.println(r2);
+        method1();
+        method2();
+    }
+
+    private static void method1() {
         BlockPos blockPos = new BlockPos(12L);
         long packed = blockPos.asLong();
         Queue<Long> queue = new ArrayDeque<>();
@@ -23,12 +21,10 @@ public final class Main {
         System.out.println(lookup(next));
     }
 
-    private static int add(int a, int b) {
-        return a + b;
-    }
-
-    private static int div(int a, int b) {
-        return a / b;
+    private static void method2() {
+        BlockPos blockPos = new BlockPos(16L);
+        long packed = blockPos.asLong();
+        System.out.println(lookup(packed));
     }
 
     private static int lookup(long packed) {
