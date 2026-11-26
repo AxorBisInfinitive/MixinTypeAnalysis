@@ -13,15 +13,29 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
-/** 元素约束按值、参数与完整通道保存关联，引用调用图提供传递依据。 */
+/** 元素约束按值、具名使用位置与完整通道保存关联，引用调用图提供传递依据。 */
 final class ConstraintGraph {
     enum Kind { VALUE, USE, STORAGE, UNKNOWN }
 
-    record Subject(ProgramPoint location, Kind kind, int parameter, StorageSlot storage) {
+    enum UseKind { ARGUMENT, RECEIVER, OPERAND, CAPTURE, OTHER }
+
+    record UseIdentity(UseKind kind, int index) {
+        String detail() {
+            return switch (kind) {
+                case ARGUMENT -> "parameter=" + index;
+                case RECEIVER -> "receiver";
+                case OPERAND -> "operand=" + index;
+                case CAPTURE -> "capture=" + index;
+                case OTHER -> "use";
+            };
+        }
+    }
+
+    record Subject(ProgramPoint location, Kind kind, UseIdentity use, StorageSlot storage) {
         ProgramPoint point() {
             String detail = switch (kind) {
                 case VALUE -> "";
-                case USE -> "parameter=" + parameter;
+                case USE -> use.detail();
                 case STORAGE -> "channel=" + storage.channel();
                 case UNKNOWN -> "";
             };
@@ -34,11 +48,29 @@ final class ConstraintGraph {
     private final Set<PropagationEdge> edges = new LinkedHashSet<>();
 
     static Subject value(ProgramPoint point) {
-        return new Subject(new ProgramPoint(point.method(), point.instruction(), point.symbol()), Kind.VALUE, -1, null);
+        return new Subject(new ProgramPoint(point.method(), point.instruction(), point.symbol()), Kind.VALUE, null, null);
     }
 
     static Subject use(ProgramPoint point, int parameter) {
-        return new Subject(new ProgramPoint(point.method(), point.instruction(), point.symbol()), Kind.USE, parameter, null);
+        UseIdentity identity = parameter < 0 ? new UseIdentity(UseKind.OTHER, -1)
+                : new UseIdentity(UseKind.ARGUMENT, parameter);
+        return use(point, identity);
+    }
+
+    static Subject receiver(ProgramPoint point) {
+        return use(point, new UseIdentity(UseKind.RECEIVER, -1));
+    }
+
+    static Subject operand(ProgramPoint point, int index) {
+        return use(point, new UseIdentity(UseKind.OPERAND, index));
+    }
+
+    static Subject capture(ProgramPoint point, int index) {
+        return use(point, new UseIdentity(UseKind.CAPTURE, index));
+    }
+
+    private static Subject use(ProgramPoint point, UseIdentity identity) {
+        return new Subject(new ProgramPoint(point.method(), point.instruction(), point.symbol()), Kind.USE, identity, null);
     }
 
     static Subject storage(StorageSlot slot) {
@@ -46,11 +78,11 @@ final class ConstraintGraph {
         String descriptor = allocation.descriptor();
         var point = new ProgramPoint(allocation.method(), allocation.instruction(),
                 descriptor.substring(1, descriptor.length() - 1));
-        return new Subject(point, Kind.STORAGE, -1, slot);
+        return new Subject(point, Kind.STORAGE, null, slot);
     }
 
     static Subject unknown(ProgramPoint point) {
-        return new Subject(new ProgramPoint(point.method(), point.instruction(), point.symbol()), Kind.UNKNOWN, -1, null);
+        return new Subject(new ProgramPoint(point.method(), point.instruction(), point.symbol()), Kind.UNKNOWN, null, null);
     }
 
     void link(Subject from, Subject to, DependencyKind kind) {
@@ -69,7 +101,8 @@ final class ConstraintGraph {
         for (Subject subject : dependencies.keySet()) {
             if (subject.kind() != Kind.STORAGE && subject.location().method().equals(point.method())
                     && subject.location().instruction() == point.instruction()
-                    && (parameter < 0 || subject.kind() == Kind.USE && subject.parameter() == parameter)) result.add(subject);
+                    && (parameter < 0 || subject.kind() == Kind.USE && subject.use().kind() == UseKind.ARGUMENT
+                    && subject.use().index() == parameter)) result.add(subject);
         }
         return result;
     }

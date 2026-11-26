@@ -530,7 +530,7 @@ final class RepresentationSolver {
                     for (int parameter = 0; parameter < arguments; parameter++) {
                         SourceValue value = frame.getStack(frame.getStackSize() - arguments + parameter);
                         if (touches(value, migrated) && !nullOnly(value)) {
-                            var use = ConstraintGraph.use(site.point("capture=" + parameter), parameter);
+                            var use = ConstraintGraph.capture(site.point(), parameter);
                             linkUse(use, value);
                             candidateProblem("UNSUPPORTED_VALUE_USE", site, parameter,
                                     pathFor(value) + " <- invokedynamic argument at " + site.describe(), List.of(), Set.of(),
@@ -552,7 +552,12 @@ final class RepresentationSolver {
                         && cast.desc.equals("java/lang/Long"))
                         && flow.consumed.getOrDefault(instruction, Set.of()).stream()
                                 .anyMatch(origin -> origin.getOpcode() != Opcodes.ACONST_NULL && migrated.contains(origin))) {
-                    problem("UNSUPPORTED_VALUE_USE", site, "Migrated value reaches opcode=" + instruction.getOpcode());
+                    for (MethodFlow.ConsumedInput input : flow.inputs(instruction)) {
+                        if (input.origins().stream().anyMatch(origin -> origin.getOpcode() != Opcodes.ACONST_NULL
+                                && migrated.contains(origin))) {
+                            problemInput(site, instruction.getOpcode(), input);
+                        }
+                    }
                 }
             }
         }
@@ -573,14 +578,15 @@ final class RepresentationSolver {
         MethodFlow flow = site.flow;
         int index = site.index;
         boolean receiverPresent = call.getOpcode() != Opcodes.INVOKESTATIC;
-        if (receiverPresent) linkUse(site, -1, flow.receiver(index, call));
+        if (receiverPresent) linkUse(ConstraintGraph.receiver(site.point()), flow.receiver(index, call));
         if (isUnbox(call) && migrated.contains(call)) {
             helper(TypeRule.Kind.READ, site);
         }
         if (receiverPresent && touches(flow.receiver(index, call), migrated)
                 && !nullOnly(flow.receiver(index, call))
                 && !(isUnbox(call) && migrated.contains(call))) {
-            problem("UNSUPPORTED_REFERENCE_USE", site, pathFor(flow.receiver(index, call)) + " <- receiver of " + symbol(call));
+            problemUse("UNSUPPORTED_REFERENCE_USE", site, ConstraintGraph.receiver(site.point()), flow.receiver(index, call),
+                    "receiver", pathFor(flow.receiver(index, call)) + " <- receiver of " + symbol(call));
         }
         if (selected.containsKey(call) && ((receiverPresent && touches(flow.receiver(index, call), migrated))
                 || java.util.stream.IntStream.range(0, Type.getArgumentTypes(call.desc).length)
@@ -632,6 +638,30 @@ final class RepresentationSolver {
 
     private void linkUse(Site site, int parameter, SourceValue value) {
         linkUse(ConstraintGraph.use(site.point(), parameter), value);
+    }
+
+    private void problemInput(Site site, int opcode, MethodFlow.ConsumedInput input) {
+        problemUse("UNSUPPORTED_VALUE_USE", site, ConstraintGraph.operand(site.point(), input.index()), input.origins(),
+                "operand=" + input.index(), "Migrated value reaches opcode=" + opcode + " operand=" + input.index());
+    }
+
+    private void problemUse(String code, Site site, ConstraintGraph.Subject use, SourceValue value,
+            String identity, String message) {
+        problemUse(code, site, use, value == null ? Set.of() : value.insns, identity, message);
+    }
+
+    private void problemUse(String code, Site site, ConstraintGraph.Subject use, Set<AbstractInsnNode> origins,
+            String identity, String message) {
+        Set<ConstraintGraph.Subject> anchors = new LinkedHashSet<>();
+        anchors.add(use);
+        for (AbstractInsnNode origin : ordered(origins)) {
+            if (origin.getOpcode() == Opcodes.ACONST_NULL || !migrated.contains(origin)) continue;
+            var value = ConstraintGraph.value(sites.get(origin).point());
+            graph.link(use, value, DependencyKind.SOURCE_RESULT);
+            graph.link(value, use, DependencyKind.SOURCE_RESULT);
+            anchors.add(value);
+        }
+        candidateProblem(code, site, -1, message, List.of(), Set.of(), anchors, identity);
     }
 
     private void linkUse(ConstraintGraph.Subject use, SourceValue value) {
@@ -1049,6 +1079,14 @@ final class RepresentationSolver {
         for (Issue issue : issues) {
             Set<ConstraintGraph.Subject> anchors = subjects(issue);
             List<PropagationEdge> relevant = graph.evidence(anchors);
+            ProgramPoint failurePoint = anchors.stream().map(ConstraintGraph.Subject::point)
+                    .filter(point -> point.method().equals(issue.site.method()) && point.instruction() == issue.site.index)
+                    .filter(point -> !point.detail().isEmpty()).findFirst().orElse(issue.site.point());
+            String failureDetail = switch (failurePoint.detail()) {
+                case "receiver" -> "receiver";
+                default -> failurePoint.detail().startsWith("operand=") || failurePoint.detail().startsWith("capture=")
+                        ? failurePoint.detail() : "";
+            };
             Type originalType = Type.getArgumentTypes(migration.target().descriptor())[migration.parameter()];
             var requirement = new love.crysh.mixinta.diagnostic.MigrationRequirement(migration.id(), migration.target(), migration.parameter(),
                     representation.getDescriptor(), relevant, anchors.stream().map(ConstraintGraph.Subject::point).distinct().toList());
@@ -1056,7 +1094,7 @@ final class RepresentationSolver {
             Diagnostic diagnostic = new Diagnostic(issue.code, issue.site.method(), instruction, issue.parameter,
                     issue.message, migration.id(), orderedEdges(java.util.stream.Stream.concat(relevant.stream(), referenceEvidence(relatedStorages(issue)).stream()).toList()), issue.candidates,
                     migration.target(), migration.parameter(), originalType.getDescriptor(), representation.getDescriptor(), requirement(issue.code),
-                    dependencyPath(issue.site.point(), relevant), issue.site.symbol());
+                    dependencyPath(failurePoint, relevant), issue.site.symbol()).withFailureDetail(failureDetail);
             result.add(diagnostic.withContainers(contextsAt(issue.site.point(), issue.parameter(), relatedStorages(issue), issue.code()))
                     .withMigrations(List.of(requirement)));
         }
@@ -1138,7 +1176,8 @@ final class RepresentationSolver {
 
     private List<DependencyStep> dependencyPath(ProgramPoint start, List<PropagationEdge> edges) {
         var goals = edges.stream().flatMap(edge -> java.util.stream.Stream.of(edge.fromPoint(), edge.toPoint()))
-                .filter(point -> java.util.Objects.equals(point.method(), start.method()) && point.instruction() == start.instruction())
+                .filter(point -> java.util.Objects.equals(point.method(), start.method()) && point.instruction() == start.instruction()
+                        && (start.detail().isEmpty() || start.detail().equals(point.detail())))
                 .sorted(java.util.Comparator.comparing(ProgramPoint::key)).toList();
         var roots = edges.stream().filter(edge -> edge.kind() == DependencyKind.TARGET_ARGUMENT)
                 .map(PropagationEdge::fromPoint).distinct().sorted(java.util.Comparator.comparing(ProgramPoint::key)).toList();
@@ -1166,7 +1205,7 @@ final class RepresentationSolver {
     private static DependencyStep step(ProgramPoint point) {
         String symbol = point.symbol();
         String descriptor = symbol == null ? "" : symbol.substring(Math.max(0, symbol.indexOf('(')));
-        return new DependencyStep(symbol, point.instruction(), descriptor);
+        return new DependencyStep(symbol, point.instruction(), descriptor, point.detail());
     }
 
     private static List<PropagationEdge> orderedEdges(java.util.Collection<PropagationEdge> edges) {

@@ -111,35 +111,26 @@ final class RepresentationBatch {
     }
 
     private record IssueKey(String code, MethodKey method, int instruction, int parameter, String source, String target,
-            String identity) { }
+            String identity, String detail) { }
 
     private static List<Diagnostic> mergeDiagnostics(List<Diagnostic> diagnostics) {
         Map<IssueKey, Diagnostic> merged = new LinkedHashMap<>();
         for (Diagnostic diagnostic : diagnostics) {
             var key = new IssueKey(diagnostic.code(), diagnostic.method(), diagnostic.instruction(), diagnostic.parameter(),
-                    diagnostic.sourceType(), diagnostic.targetType(), diagnostic.failureSymbol());
+                    diagnostic.sourceType(), diagnostic.targetType(), diagnostic.failureSymbol(), diagnostic.failureDetail());
             merged.merge(key, diagnostic, (first, second) -> new Diagnostic(first.code(), first.method(), first.instruction(), first.parameter(),
                     first.message(), first.migration(), java.util.stream.Stream.concat(first.propagation().stream(), second.propagation().stream()).distinct().toList(),
                     java.util.stream.Stream.concat(first.candidates().stream(), second.candidates().stream()).distinct().toList(),
                     first.target(), first.targetParameter(), first.sourceType(), first.targetType(), first.requirement(), first.dependencyPath(), first.failureSymbol(),
                     java.util.stream.Stream.concat(first.containers().stream(), second.containers().stream()).distinct().toList(),
-                    mergeRequirements(first.migrations(), second.migrations())));
+                    mergeRequirements(first.migrations(), second.migrations()), first.failureDetail()));
         }
         return List.copyOf(merged.values());
     }
 
     private static List<MigrationRequirement> mergeRequirements(List<MigrationRequirement> first,
             List<MigrationRequirement> second) {
-        Map<String, MigrationRequirement> merged = new LinkedHashMap<>();
-        java.util.stream.Stream.concat(first.stream(), second.stream()).forEach(requirement -> {
-            String key = requirement.target() + "#" + requirement.parameter() + "#" + requirement.id()
-                    + "#" + requirement.representation();
-            merged.merge(key, requirement, (left, right) -> new MigrationRequirement(left.id(), left.target(), left.parameter(),
-                    left.representation(), java.util.stream.Stream.concat(left.dependencies().stream(), right.dependencies().stream())
-                            .distinct().toList(), java.util.stream.Stream.concat(left.anchors().stream(), right.anchors().stream())
-                            .distinct().toList()));
-        });
-        return List.copyOf(merged.values());
+        return RepresentationPlan.mergeContributors(List.of(first, second));
     }
 
     private static void validateIdentities(List<Session> sessions, List<Diagnostic> diagnostics) {

@@ -26,6 +26,7 @@ final class DiagnosticFormatter {
                 .comparing((Diagnostic value) -> String.valueOf(value.target()))
                 .thenComparing(value -> String.valueOf(value.method()))
                 .thenComparingInt(Diagnostic::instruction)
+                .thenComparing(Diagnostic::failureDetail)
                 .thenComparing(Diagnostic::code)
                 .thenComparing(Diagnostic::message)).toList();
         StringBuilder output = new StringBuilder("TypedOverwriteException: ")
@@ -100,6 +101,7 @@ final class DiagnosticFormatter {
                     .append(diagnostic.failureSymbol().isEmpty()
                             ? displayMethod(diagnostic.method(), verbosity)
                             : displaySymbol(diagnostic.failureSymbol(), verbosity))
+                    .append(diagnostic.failureDetail().isEmpty() ? "" : " " + diagnostic.failureDetail())
                     .append(System.lineSeparator());
         } else {
             output.append("    ").append(diagnostic.message()).append(System.lineSeparator());
@@ -174,6 +176,9 @@ final class DiagnosticFormatter {
             if (step.instruction() >= 0) {
                 output.append(" [").append(step.instruction()).append("]");
             }
+            if (!step.detail().isEmpty()) {
+                output.append(" (").append(step.detail()).append(")");
+            }
             output.append(System.lineSeparator());
         }
     }
@@ -186,7 +191,8 @@ final class DiagnosticFormatter {
                 goals = requirement.anchors();
             } else {
                 goals = List.of(new ProgramPoint(diagnostic.method(), diagnostic.instruction(), diagnostic.failureSymbol(),
-                        diagnostic.parameter() < 0 ? "" : "parameter=" + diagnostic.parameter()));
+                        !diagnostic.failureDetail().isEmpty() ? diagnostic.failureDetail()
+                                : diagnostic.parameter() < 0 ? "" : "parameter=" + diagnostic.parameter()));
             }
         }
         List<ProgramPoint> destinations = goals;
@@ -223,7 +229,7 @@ final class DiagnosticFormatter {
 
     private static DependencyStep step(ProgramPoint point) {
         String symbol = point.symbol();
-        return new DependencyStep(symbol, point.instruction(), descriptor(symbol));
+        return new DependencyStep(symbol, point.instruction(), descriptor(symbol), point.detail());
     }
 
     private static String displayPoint(ProgramPoint point, DiagnosticVerbosity verbosity) {

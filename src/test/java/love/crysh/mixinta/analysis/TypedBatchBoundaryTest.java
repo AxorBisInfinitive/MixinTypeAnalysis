@@ -191,6 +191,29 @@ class TypedBatchBoundaryTest {
     }
 
     @Test
+    void distinguishesOperandsOfOneUnsupportedArithmeticInstruction() {
+        var fixture = TypedBatchRepresentationTest.fixture("""
+                long left = new BlockPos(12).asLong();
+                long right = new BlockPos(3).asLong();
+                return first(left) + second(right) + (int)(left + right);
+                """, "BlockPos", "RulesA", false);
+        var failure = failure(fixture);
+        var diagnostics = failure.diagnostics().stream()
+                .filter(diagnostic -> diagnostic.code().equals("UNSUPPORTED_VALUE_USE"))
+                .filter(diagnostic -> diagnostic.message().contains("opcode="))
+                .toList();
+
+        assertEquals(java.util.Set.of("operand=0", "operand=1"), diagnostics.stream()
+                .map(Diagnostic::failureDetail).collect(java.util.stream.Collectors.toSet()));
+        assertTrue(diagnostics.stream().allMatch(diagnostic -> diagnostic.propagation().stream()
+                .anyMatch(edge -> edge.fromPoint().detail().equals(diagnostic.failureDetail())
+                        || edge.toPoint().detail().equals(diagnostic.failureDetail()))));
+        String report = failure.format(love.crysh.mixinta.diagnostic.DiagnosticVerbosity.NORMAL);
+        assertTrue(report.contains("operand=0"), report);
+        assertTrue(report.contains("operand=1"), report);
+    }
+
+    @Test
     void distinguishesMigratedValuesCapturedAtOneDynamicCall() {
         var fixture = TypedBatchRepresentationTest.fixture("""
                 long firstValue = new BlockPos(12).asLong();

@@ -21,6 +21,9 @@ import org.objectweb.asm.tree.analysis.SourceValue;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
+import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -32,6 +35,7 @@ final class MethodFlow {
     final Map<AbstractInsnNode, Integer> indices = new IdentityHashMap<>();
     final Map<AbstractInsnNode, StorageId> allocations = new IdentityHashMap<>();
     final Map<AbstractInsnNode, Set<AbstractInsnNode>> consumed = new IdentityHashMap<>();
+    final Map<AbstractInsnNode, Map<Integer, Set<AbstractInsnNode>>> consumedInputs = new IdentityHashMap<>();
     Frame<SourceValue>[] frames;
     ContainerAliases aliases;
 
@@ -96,6 +100,16 @@ final class MethodFlow {
         return aliases.stack(index, frames[index].getStackSize() - arguments - 1);
     }
 
+    List<ConsumedInput> inputs(AbstractInsnNode instruction) {
+        return consumedInputs.getOrDefault(instruction, Map.of()).entrySet().stream()
+                .sorted(Map.Entry.comparingByKey())
+                .map(entry -> new ConsumedInput(entry.getKey(), Set.copyOf(entry.getValue())))
+                .toList();
+    }
+
+    record ConsumedInput(int index, Set<AbstractInsnNode> origins) {
+    }
+
     private final class Origins extends SourceInterpreter {
         private final Map<Integer, LabelNode> parameters = new HashMap<>();
 
@@ -120,21 +134,29 @@ final class MethodFlow {
             }
         }
 
+        private void consumeInputs(AbstractInsnNode instruction, SourceValue... values) {
+            consume(instruction, values);
+            Map<Integer, Set<AbstractInsnNode>> inputs = consumedInputs.computeIfAbsent(instruction, ignored -> new LinkedHashMap<>());
+            for (int index = 0; index < values.length; index++) {
+                inputs.computeIfAbsent(index, ignored -> new LinkedHashSet<>()).addAll(values[index].insns);
+            }
+        }
+
         @Override
         public SourceValue copyOperation(AbstractInsnNode instruction, SourceValue value) {
-            consume(instruction, value);
+            consumeInputs(instruction, value);
             return value;
         }
 
         @Override
         public SourceValue binaryOperation(AbstractInsnNode instruction, SourceValue first, SourceValue second) {
-            consume(instruction, first, second);
+            consumeInputs(instruction, first, second);
             return super.binaryOperation(instruction, first, second);
         }
 
         @Override
         public SourceValue ternaryOperation(AbstractInsnNode instruction, SourceValue first, SourceValue second, SourceValue third) {
-            consume(instruction, first, second, third);
+            consumeInputs(instruction, first, second, third);
             return super.ternaryOperation(instruction, first, second, third);
         }
 
@@ -145,7 +167,7 @@ final class MethodFlow {
 
         @Override
         public SourceValue unaryOperation(AbstractInsnNode instruction, SourceValue value) {
-            consume(instruction, value);
+            consumeInputs(instruction, value);
             return instruction.getOpcode() == Opcodes.CHECKCAST ? value : super.unaryOperation(instruction, value);
         }
     }

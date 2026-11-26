@@ -23,13 +23,25 @@ public record Diagnostic(
         List<DependencyStep> dependencyPath,
         String failureSymbol,
         List<ContainerContext> containers,
-        List<MigrationRequirement> migrations) {
+        List<MigrationRequirement> migrations,
+        String failureDetail) {
     public Diagnostic {
         propagation = List.copyOf(propagation);
         candidates = List.copyOf(candidates);
         dependencyPath = List.copyOf(dependencyPath);
         containers = List.copyOf(containers);
         migrations = List.copyOf(migrations);
+        failureDetail = failureDetail == null ? "" : failureDetail;
+    }
+
+    public Diagnostic(String code, MethodKey method, int instruction, int parameter, String message,
+            String migration, List<PropagationEdge> propagation, List<String> candidates,
+            MethodKey target, int targetParameter, String sourceType, String targetType,
+            RuleRequirement requirement, List<DependencyStep> dependencyPath, String failureSymbol,
+            List<ContainerContext> containers, List<MigrationRequirement> migrations) {
+        this(code, method, instruction, parameter, message, migration, propagation, candidates,
+                target, targetParameter, sourceType, targetType, requirement, dependencyPath, failureSymbol,
+                containers, migrations, "");
     }
 
     public Diagnostic(String code, MethodKey method, int instruction, int parameter, String message,
@@ -38,7 +50,7 @@ public record Diagnostic(
             RuleRequirement requirement, List<DependencyStep> dependencyPath, String failureSymbol) {
         this(code, method, instruction, parameter, message, migration, propagation, candidates,
                 target, targetParameter, sourceType, targetType, requirement, dependencyPath, failureSymbol,
-                List.of(), List.of());
+                List.of(), List.of(), "");
     }
 
     public Diagnostic(String code, MethodKey method, int instruction, int parameter, String message) {
@@ -56,19 +68,25 @@ public record Diagnostic(
             RuleRequirement requirement, List<DependencyStep> dependencyPath, String failureSymbol) {
         return new Diagnostic(code, method, instruction, parameter, message, migration, propagation, candidates,
                 target, targetParameter, sourceType, targetType, requirement, dependencyPath, failureSymbol,
-                containers, migrations);
+                containers, migrations, failureDetail);
     }
 
     public Diagnostic withContainers(List<ContainerContext> containers) {
         return new Diagnostic(code, method, instruction, parameter, message, migration, propagation, candidates,
                 target, targetParameter, sourceType, targetType, requirement, dependencyPath, failureSymbol,
-                containers, migrations);
+                containers, migrations, failureDetail);
     }
 
     public Diagnostic withMigrations(List<MigrationRequirement> migrations) {
         return new Diagnostic(code, method, instruction, parameter, message, migration, propagation, candidates,
                 target, targetParameter, sourceType, targetType, requirement, dependencyPath, failureSymbol,
-                containers, migrations);
+                containers, migrations, failureDetail);
+    }
+
+    public Diagnostic withFailureDetail(String failureDetail) {
+        return new Diagnostic(code, method, instruction, parameter, message, migration, propagation, candidates,
+                target, targetParameter, sourceType, targetType, requirement, dependencyPath, failureSymbol,
+                containers, migrations, failureDetail);
     }
 
     @Override

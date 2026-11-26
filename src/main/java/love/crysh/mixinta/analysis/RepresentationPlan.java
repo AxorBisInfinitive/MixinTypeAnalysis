@@ -47,26 +47,33 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
         for (RepresentationPlan plan : plans) {
             for (Edit edit : plan.edits()) {
                 Edit previous = edits.putIfAbsent(edit.location(), edit);
-                if (previous != null && !sameEdit(previous, edit)) {
+                if (previous == null) continue;
+                if (sameEdit(previous, edit)) {
+                    edits.put(edit.location(), previous.withContributors(mergeContributors(previous.contributors(), edit.contributors())));
+                } else {
                     conflict(edit.location(), "Instruction requires different edits", diagnostics,
-                            List.of(previous.source(), edit.source()));
+                            mergeContributors(previous.contributors(), edit.contributors()));
                 }
             }
             for (Argument argument : plan.arguments()) {
                 var parameters = arguments.computeIfAbsent(argument.location(), ignored -> new LinkedHashMap<>());
                 Argument previous = parameters.putIfAbsent(argument.parameter(), argument);
-                if (previous != null && (!previous.original().equals(argument.original())
+                if (previous == null) continue;
+                if (!previous.original().equals(argument.original())
                         || !previous.implementation().equals(argument.implementation())
                         || !previous.representation().equals(argument.representation())
-                        || !Objects.equals(previous.encoder(), argument.encoder()))) {
+                        || !Objects.equals(previous.encoder(), argument.encoder())) {
                     conflict(argument.location(), "Argument requires incompatible conversions parameter=" + argument.parameter(), diagnostics,
-                            List.of(previous.source(), argument.source()));
+                            mergeContributors(previous.contributors(), argument.contributors()));
+                } else {
+                    parameters.put(argument.parameter(), previous.withContributors(
+                            mergeContributors(previous.contributors(), argument.contributors())));
                 }
             }
             for (Local local : plan.locals()) {
                 Location key = new Location(local.method(), local.index());
                 Local previous = locals.putIfAbsent(key, local);
-                if (previous == null || previous.equals(local)) continue;
+                if (previous == null) continue;
                 try {
                     if (!previous.descriptor().equals(local.descriptor())) {
                         throw new IllegalArgumentException("Local variable requires incompatible descriptors");
@@ -74,18 +81,22 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
                     var original = ClassFiles.findMethod(classes.get(local.method().owner()), local.method().name(),
                             local.method().descriptor()).localVariables.get(local.index());
                     locals.put(key, new Local(local.method(), local.index(), local.descriptor(),
-                            mergeSignature(original.signature, previous.signature(), local.signature()), previous.source()));
+                            mergeSignature(original.signature, previous.signature(), local.signature()),
+                            mergeContributors(previous.contributors(), local.contributors())));
                 } catch (IllegalArgumentException failure) {
                     conflict(new Location(local.method(), -1), failure.getMessage() + " local=" + local.index(), diagnostics,
-                            List.of(previous.source(), local.source()));
+                            mergeContributors(previous.contributors(), local.contributors()));
                 }
             }
             for (Bridge bridge : plan.bridges()) {
                 Bridge previous = bridges.putIfAbsent(bridge.method(), bridge);
-                if (previous != null && !previous.method().equals(bridge.method())
-                        || previous != null && !previous.helper().equals(bridge.helper())) {
+                if (previous == null) continue;
+                if (!previous.helper().equals(bridge.helper())) {
                     conflict(new Location(bridge.method(), -1), "Rule bridge requires different helpers", diagnostics,
-                            List.of(previous.source(), bridge.source()));
+                            mergeContributors(previous.contributors(), bridge.contributors()));
+                } else {
+                    bridges.put(bridge.method(), previous.withContributors(
+                            mergeContributors(previous.contributors(), bridge.contributors())));
                 }
             }
         }
@@ -94,7 +105,7 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
             var entry = argumentEntries.next();
             if (entry.getValue().values().stream().map(Argument::implementation).distinct().count() > 1) {
                 conflict(entry.getKey(), "Invocation requires incompatible final descriptors", diagnostics,
-                        entry.getValue().values().stream().map(Argument::source).toList());
+                        mergeContributors(entry.getValue().values().stream().map(Argument::contributors).toList()));
             }
             if (edits.containsKey(entry.getKey())) {
                 Edit edit = edits.get(entry.getKey());
@@ -102,11 +113,12 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
                 if (edit.observation() && entry.getValue().size() == 1 && query != null && query.encoder() != null
                         && query.original().equals(query.implementation())) {
                     edits.put(entry.getKey(), new Edit(edit.location(), edit.action(), edit.helper(), edit.representation(), edit.binding(),
-                            edit.parameter(), new Encoding(query.representation(), query.encoder()), edit.source()));
+                            edit.parameter(), new Encoding(query.representation(), query.encoder()),
+                            mergeContributors(edit.contributors(), query.contributors())));
                     argumentEntries.remove();
                 } else conflict(entry.getKey(), "Invocation replacement overlaps argument conversion", diagnostics,
-                        java.util.stream.Stream.concat(java.util.stream.Stream.of(edit.source()),
-                                entry.getValue().values().stream().map(Argument::source)).toList());
+                        mergeContributors(java.util.stream.Stream.concat(java.util.stream.Stream.of(edit.contributors()),
+                                entry.getValue().values().stream().map(Argument::contributors)).toList()));
             }
         }
         return new RepresentationPlan(List.copyOf(edits.values()), arguments.values().stream()
@@ -116,8 +128,31 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
                 plans.stream().flatMap(plan -> plan.dependencies().stream()).distinct().toList());
     }
 
-    private static void conflict(Location location, String message, List<Diagnostic> diagnostics) {
-        conflict(location, message, diagnostics, List.of());
+    private static List<love.crysh.mixinta.diagnostic.MigrationRequirement> mergeContributors(
+            List<love.crysh.mixinta.diagnostic.MigrationRequirement> first,
+            List<love.crysh.mixinta.diagnostic.MigrationRequirement> second) {
+        return mergeContributors(List.of(first, second));
+    }
+
+    static List<love.crysh.mixinta.diagnostic.MigrationRequirement> mergeContributors(
+            List<List<love.crysh.mixinta.diagnostic.MigrationRequirement>> groups) {
+        Map<String, love.crysh.mixinta.diagnostic.MigrationRequirement> merged = new LinkedHashMap<>();
+        groups.stream().flatMap(List::stream).filter(Objects::nonNull).forEach(requirement -> {
+            String key = requirement.target() + "#" + requirement.parameter() + "#" + requirement.id()
+                    + "#" + requirement.representation();
+            merged.merge(key, requirement, (left, right) -> new love.crysh.mixinta.diagnostic.MigrationRequirement(
+                    left.id(), left.target(), left.parameter(), left.representation(),
+                    java.util.stream.Stream.concat(left.dependencies().stream(), right.dependencies().stream())
+                            .distinct().sorted(java.util.Comparator.comparing((PropagationEdge edge) -> edge.fromPoint().key())
+                                    .thenComparing(edge -> edge.toPoint().key()).thenComparing(edge -> edge.kind().name())).toList(),
+                    java.util.stream.Stream.concat(left.anchors().stream(), right.anchors().stream()).distinct()
+                            .sorted(java.util.Comparator.comparing(love.crysh.mixinta.model.ProgramPoint::key)).toList()));
+        });
+        return merged.values().stream().sorted(java.util.Comparator
+                .comparing((love.crysh.mixinta.diagnostic.MigrationRequirement value) -> value.target().toString())
+                .thenComparingInt(love.crysh.mixinta.diagnostic.MigrationRequirement::parameter)
+                .thenComparing(love.crysh.mixinta.diagnostic.MigrationRequirement::id)
+                .thenComparing(love.crysh.mixinta.diagnostic.MigrationRequirement::representation)).toList();
     }
 
     private static boolean sameEdit(Edit first, Edit second) {
@@ -129,8 +164,16 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
 
     private static void conflict(Location location, String message, List<Diagnostic> diagnostics,
             List<love.crysh.mixinta.diagnostic.MigrationRequirement> requirements) {
+        for (int index = 0; index < diagnostics.size(); index++) {
+            Diagnostic existing = diagnostics.get(index);
+            if (existing.code().equals("REPRESENTATION_PLAN_CONFLICT") && existing.method().equals(location.method())
+                    && existing.instruction() == location.instruction() && existing.message().equals(message)) {
+                diagnostics.set(index, existing.withMigrations(mergeContributors(existing.migrations(), requirements)));
+                return;
+            }
+        }
         diagnostics.add(new Diagnostic("REPRESENTATION_PLAN_CONFLICT", location.method(), location.instruction(), -1, message)
-                .withMigrations(requirements.stream().filter(Objects::nonNull).distinct().toList()));
+                .withMigrations(mergeContributors(List.of(requirements))));
     }
 
     private static String mergeSignature(String original, String first, String second) {
@@ -167,14 +210,28 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
 
     record Edit(Location location, String action, MethodKey helper, Type representation,
             TypeRule.Binding binding, int parameter, Encoding query,
-            love.crysh.mixinta.diagnostic.MigrationRequirement source) {
+            List<love.crysh.mixinta.diagnostic.MigrationRequirement> contributors) {
+        Edit {
+            contributors = List.copyOf(contributors);
+        }
+
         Edit(Location location, String action, MethodKey helper, Type representation, TypeRule.Binding binding, int parameter) {
-            this(location, action, helper, representation, binding, parameter, null, null);
+            this(location, action, helper, representation, binding, parameter, null, List.of());
         }
 
         Edit(Location location, String action, MethodKey helper, Type representation, TypeRule.Binding binding, int parameter,
                 love.crysh.mixinta.diagnostic.MigrationRequirement source) {
-            this(location, action, helper, representation, binding, parameter, null, source);
+            this(location, action, helper, representation, binding, parameter, null, source == null ? List.of() : List.of(source));
+        }
+
+        Edit(Location location, String action, MethodKey helper, Type representation, TypeRule.Binding binding,
+                int parameter, Encoding query, love.crysh.mixinta.diagnostic.MigrationRequirement source) {
+            this(location, action, helper, representation, binding, parameter, query,
+                    source == null ? List.of() : List.of(source));
+        }
+
+        Edit withContributors(List<love.crysh.mixinta.diagnostic.MigrationRequirement> contributors) {
+            return new Edit(location, action, helper, representation, binding, parameter, query, contributors);
         }
 
         boolean observation() {
@@ -299,14 +356,50 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
 
     record Argument(Location location, MethodKey original, MethodKey implementation, int parameter,
             Type representation, MethodKey encoder, String migration,
-            love.crysh.mixinta.diagnostic.MigrationRequirement source) {
+            List<love.crysh.mixinta.diagnostic.MigrationRequirement> contributors) {
+        Argument {
+            contributors = List.copyOf(contributors);
+        }
+
+        Argument(Location location, MethodKey original, MethodKey implementation, int parameter,
+                Type representation, MethodKey encoder, String migration,
+                love.crysh.mixinta.diagnostic.MigrationRequirement source) {
+            this(location, original, implementation, parameter, representation, encoder, migration,
+                    source == null ? List.of() : List.of(source));
+        }
+
+        Argument withContributors(List<love.crysh.mixinta.diagnostic.MigrationRequirement> contributors) {
+            return new Argument(location, original, implementation, parameter, representation, encoder, migration, contributors);
+        }
     }
 
     record Local(MethodKey method, int index, String descriptor, String signature,
-            love.crysh.mixinta.diagnostic.MigrationRequirement source) {
+            List<love.crysh.mixinta.diagnostic.MigrationRequirement> contributors) {
+        Local {
+            contributors = List.copyOf(contributors);
+        }
+
+        Local(MethodKey method, int index, String descriptor, String signature,
+                love.crysh.mixinta.diagnostic.MigrationRequirement source) {
+            this(method, index, descriptor, signature, source == null ? List.of() : List.of(source));
+        }
+
     }
 
-    record Bridge(MethodKey method, MethodKey helper, love.crysh.mixinta.diagnostic.MigrationRequirement source) {
+    record Bridge(MethodKey method, MethodKey helper,
+            List<love.crysh.mixinta.diagnostic.MigrationRequirement> contributors) {
+        Bridge {
+            contributors = List.copyOf(contributors);
+        }
+
+        Bridge(MethodKey method, MethodKey helper, love.crysh.mixinta.diagnostic.MigrationRequirement source) {
+            this(method, helper, source == null ? List.of() : List.of(source));
+        }
+
+        Bridge withContributors(List<love.crysh.mixinta.diagnostic.MigrationRequirement> contributors) {
+            return new Bridge(method, helper, contributors);
+        }
+
         void apply(ClassNode owner) {
             MethodNode existing = ClassFiles.findMethod(owner, method.name(), method.descriptor());
             if (existing != null) {
