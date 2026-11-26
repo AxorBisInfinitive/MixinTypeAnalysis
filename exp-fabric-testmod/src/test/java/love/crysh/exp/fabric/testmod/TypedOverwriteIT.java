@@ -29,6 +29,16 @@ class TypedOverwriteIT {
     private static final String SUBJECT = "love.crysh.exp.Subject";
     private static final String MIXIN_PACKAGE = "fixture.mixin";
     private static final String TYPED = "@love.crysh.mixinta.TypedOverwrite(method=\"div(II)I\")";
+    private static final String REFERENCE_MIXIN = """
+            @love.crysh.mixinta.TypedOverwrite(method="lookup(J)I", parameters=@love.crysh.mixinta.ParameterMigration(parameter=0, rules=SubjectMixin.class))
+            public static int lookup(love.crysh.exp.BlockPos value){return (int)value.value();}
+            @love.crysh.mixinta.TypeRule(value=love.crysh.mixinta.TypeRule.Kind.SOURCE, method="love.crysh.exp.BlockPos.asLong()J")
+            private static love.crysh.exp.BlockPos keep(love.crysh.exp.BlockPos value){return value;}
+            @love.crysh.mixinta.TypeRule(value=love.crysh.mixinta.TypeRule.Kind.ENCODE)
+            private static long encode(love.crysh.exp.BlockPos value){return value.value();}
+            @love.crysh.mixinta.TypeRule(value=love.crysh.mixinta.TypeRule.Kind.READ)
+            private static love.crysh.exp.BlockPos read(love.crysh.exp.BlockPos value){return java.util.Objects.requireNonNull(value);}
+            """;
 
     @TempDir
     Path temporary;
@@ -160,7 +170,9 @@ class TypedOverwriteIT {
                     Object alias = first;
                     for (int index = 0; index < 3; index++) alias = alias == first ? second : first;
                     if (!(alias instanceof java.util.Queue)) throw new AssertionError();
-                    return lookup(((java.util.Queue<Long>) alias).poll());
+                    synchronized (alias) {
+                        return lookup(((java.util.Queue<Long>) alias).poll());
+                    }
                     """;
             default -> "return lookup(new BlockPos(12).asLong());";
         };
@@ -196,19 +208,53 @@ class TypedOverwriteIT {
                     }
                 }
                 """.formatted(scenario.equals("map")));
-        String body = """
-                @love.crysh.mixinta.TypedOverwrite(method="lookup(J)I", parameters=@love.crysh.mixinta.ParameterMigration(parameter=0, rules=SubjectMixin.class))
-                public static int lookup(love.crysh.exp.BlockPos value){return (int)value.value();}
-                @love.crysh.mixinta.TypeRule(value=love.crysh.mixinta.TypeRule.Kind.SOURCE, method="love.crysh.exp.BlockPos.asLong()J")
-                private static love.crysh.exp.BlockPos keep(love.crysh.exp.BlockPos value){return value;}
-                @love.crysh.mixinta.TypeRule(value=love.crysh.mixinta.TypeRule.Kind.ENCODE)
-                private static long encode(love.crysh.exp.BlockPos value){return value.value();}
-                @love.crysh.mixinta.TypeRule(value=love.crysh.mixinta.TypeRule.Kind.READ)
-                private static love.crysh.exp.BlockPos read(love.crysh.exp.BlockPos value){return java.util.Objects.requireNonNull(value);}
-                """;
-        Result result = launch(app, Map.of("SubjectMixin", mixin("SubjectMixin", 1000, body)), List.of());
+        Result result = launch(app, Map.of("SubjectMixin", mixin("SubjectMixin", 1000, REFERENCE_MIXIN)), List.of());
         result.success();
         result.contains("RESULT=12", "REPRESENTATION_BYTECODE_VERIFIED");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"field", "array", "call", "capture"})
+    void rejectsUncoveredContainerEffectsBeforeBusinessStarts(String scenario) throws Exception {
+        String operation = switch (scenario) {
+            case "field" -> "saved = queue;";
+            case "array" -> "Object[] array = new Object[1]; array[0] = queue;";
+            case "call" -> "expose(queue, queue);";
+            default -> "Runnable task = () -> queue.clear();";
+        };
+        Map<String, String> app = new LinkedHashMap<>();
+        app.put("love.crysh.exp.BlockPos", "package love.crysh.exp; public record BlockPos(long value) { public long asLong(){return value;} }");
+        app.put("love.crysh.exp.Subject", """
+                package love.crysh.exp;
+                public final class Subject {
+                    public static Object saved;
+                    public static void expose(Object first, Object second) {}
+                    public static int lookup(long value) { return (int)value; }
+                    public static int run() {
+                        java.util.Queue<Long> queue = new java.util.ArrayDeque<>();
+                        queue.add(new BlockPos(12).asLong());
+                        %s
+                        return lookup(queue.poll());
+                    }
+                }
+                """.formatted(operation));
+        app.put("love.crysh.exp.Main", """
+                package love.crysh.exp;
+                public final class Main {
+                    public static void main(String[] args) {
+                        System.out.println("BUSINESS_EXECUTED");
+                        System.out.println(Subject.run());
+                    }
+                }
+                """);
+        Result result = launch(app, Map.of("SubjectMixin", mixin("SubjectMixin", 1000, REFERENCE_MIXIN)), List.of());
+        result.failure(scenario.equals("call") ? "UNKNOWN_CONTAINER_USE" : "ESCAPED_CONTAINER",
+                "channels=[0]", "allocation=java/util/ArrayDeque", "lookup", "poll");
+        if (scenario.equals("call")) {
+            result.contains("2 unresolved constraints", "argument=0", "argument=1", "escape=UNKNOWN");
+        } else {
+            result.contains("escape=ESCAPED");
+        }
     }
 
     @ParameterizedTest

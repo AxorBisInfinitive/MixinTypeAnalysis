@@ -128,6 +128,10 @@ class TypedContainerTest {
     }
 
     static BytecodeFixtures.Fixture fixture(String body) {
+        return fixture(body, "");
+    }
+
+    static BytecodeFixtures.Fixture fixture(String body, String members) {
         return BytecodeFixtures.fixture("""
                 public static int sources;
                 public static BlockPos position(long value) { sources++; return new BlockPos(value); }
@@ -135,7 +139,7 @@ class TypedContainerTest {
                 public static int lookup(long value) { return (int)value; }
                 public static long legacy(long value) { return value; }
                 public static long run(boolean flag) {
-                """ + body + "}", """
+                """ + body + "}" + members, """
                 @TypedOverwrite(method="lookup(J)I", parameters=@love.crysh.mixinta.ParameterMigration(parameter=0, rules=SubjectMixin.class))
                 public static int lookup(BlockPos value) { return (int)value.value(); }
                 @love.crysh.mixinta.TypeRule(value=love.crysh.mixinta.TypeRule.Kind.SOURCE, method="sample.BlockPos.asLong()J")

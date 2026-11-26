@@ -66,6 +66,9 @@ final class RepresentationSolver {
             if (instruction instanceof FieldInsnNode field) {
                 return field.owner + "." + field.name + ":" + field.desc;
             }
+            if (instruction instanceof InvokeDynamicInsnNode dynamic) {
+                return "invokedynamic " + dynamic.name + dynamic.desc;
+            }
             return method().toString();
         }
 
@@ -142,6 +145,7 @@ final class RepresentationSolver {
     private final Map<AbstractInsnNode, StorageId> storageIds = new IdentityHashMap<>();
     private final Set<StorageSlot> storages = new LinkedHashSet<>();
     private final List<ContainerUse> containerUses = new ArrayList<>();
+    private final ContainerEffects containerEffects = new ContainerEffects();
     private final ArrayDeque<Demand> pending = new ArrayDeque<>();
     private final Set<AbstractInsnNode> requested = new HashSet<>();
     private final List<Diagnostic> diagnostics;
@@ -155,7 +159,7 @@ final class RepresentationSolver {
     private final List<PlanChange> changes = new ArrayList<>();
     private final Type representation;
 
-    private record Issue(String code, Site site, String message, List<String> candidates) {
+    private record Issue(String code, Site site, int parameter, String message, List<String> candidates) {
     }
 
     RepresentationSolver(Map<String, ClassNode> classes, List<RepresentationMigration> migrations,
@@ -179,6 +183,7 @@ final class RepresentationSolver {
             flow.aliases = new ContainerAliases(flow.frames, storageIds, origin -> sites.get(origin).point());
         }
         indexContainerUses();
+        indexContainerEffects();
         seedTargets();
         int previous;
         do {
@@ -188,6 +193,7 @@ final class RepresentationSolver {
             unifyLocalMerges();
         } while (!pending.isEmpty() || previous != requested.size() + storages.size());
         validateUses();
+        validateContainerEffects();
         finishDiagnostics();
         if (issues.isEmpty()) {
             for (Flow flow : flows) {
@@ -240,6 +246,72 @@ final class RepresentationSolver {
                             flow.receiverReferences(index, call)));
                 }
             }
+        }
+    }
+
+    private void indexContainerEffects() {
+        for (Flow flow : flows) {
+            for (int index = 0; index < flow.instructions.length; index++) {
+                if (flow.frames[index] == null) {
+                    continue;
+                }
+                AbstractInsnNode instruction = flow.instructions[index];
+                ProgramPoint point = new Site(flow, index).point();
+                if (instruction instanceof MethodInsnNode call) {
+                    if (call.getOpcode() != Opcodes.INVOKESTATIC && ContainerSummary.resolve(call) == null) {
+                        containerEffects.record(flow.receiverReferences(index, call), point,
+                                ContainerEffects.Kind.UNKNOWN_OPERATION, -1);
+                    }
+                    for (int parameter = 0; parameter < Type.getArgumentTypes(call.desc).length; parameter++) {
+                        containerEffects.record(flow.argumentReferences(index, call, parameter), point,
+                                ContainerEffects.Kind.CALL_ARGUMENT, parameter);
+                    }
+                } else if (instruction instanceof InvokeDynamicInsnNode dynamic) {
+                    int arguments = Type.getArgumentTypes(dynamic.desc).length;
+                    for (int parameter = 0; parameter < arguments; parameter++) {
+                        var references = flow.aliases.stack(index, flow.frames[index].getStackSize() - arguments + parameter);
+                        containerEffects.record(references, point, ContainerEffects.Kind.DYNAMIC_CAPTURE, parameter);
+                    }
+                } else {
+                    ContainerEffects.Kind kind = switch (instruction.getOpcode()) {
+                        case Opcodes.ARETURN -> ContainerEffects.Kind.RETURN;
+                        case Opcodes.PUTFIELD, Opcodes.PUTSTATIC -> ContainerEffects.Kind.FIELD_STORE;
+                        case Opcodes.AASTORE -> ContainerEffects.Kind.ARRAY_STORE;
+                        default -> null;
+                    };
+                    if (kind != null) {
+                        containerEffects.record(flow.topReferences(index), point, kind, -1);
+                    } else if (!(instruction instanceof VarInsnNode) && !isContainerReferenceOperation(instruction)) {
+                        var references = flow.aliases.origins(flow.consumed.getOrDefault(instruction, Set.of()));
+                        containerEffects.record(references, point, ContainerEffects.Kind.UNSUPPORTED_USE, -1);
+                    }
+                }
+            }
+        }
+    }
+
+    private void validateContainerEffects() {
+        for (ContainerEffects.Access access : containerEffects.accesses()) {
+            List<StorageId> affected = access.storages().stream().filter(this::isSelectedStorage)
+                    .sorted(java.util.Comparator.comparing(storage -> storagePoint(storage).key())).toList();
+            if (affected.isEmpty()) {
+                continue;
+            }
+            DependencyKind kind = access.kind().escape == ContainerEffects.EscapeState.ESCAPED
+                    ? DependencyKind.CONTAINER_ESCAPE : DependencyKind.CONTAINER_EXTERNAL_ACCESS;
+            List<String> details = new ArrayList<>();
+            for (StorageId storage : affected) {
+                dependencies.add(new PropagationEdge(storagePoint(storage), access.point(), kind));
+                List<Integer> channels = storages.stream().filter(slot -> slot.storage().equals(storage))
+                        .map(StorageSlot::channel).sorted().toList();
+                details.add(site(storagePoint(storage)).describe() + " allocation=" + storagePoint(storage).symbol()
+                        + " channels=" + channels + " escape=" + containerEffects.state(storage));
+            }
+            String binding = access.parameter() >= 0 ? "argument=" + access.parameter()
+                    : access.kind() == ContainerEffects.Kind.UNKNOWN_OPERATION ? "receiver" : "value";
+            candidateProblem(access.kind().code(), site(access.point()), access.parameter(),
+                    access.kind() + " " + binding + " requires modeled container effects, storage=" + String.join(", ", details),
+                    List.of());
         }
     }
 
@@ -461,10 +533,6 @@ final class RepresentationSolver {
                     Frame<SourceValue> frame = flow.frames[index];
                     for (int parameter = 0; parameter < arguments; parameter++) {
                         SourceValue value = frame.getStack(frame.getStackSize() - arguments + parameter);
-                        StorageReferences references = flow.aliases.stack(index, frame.getStackSize() - arguments + parameter);
-                        if (touchesStorage(references)) {
-                            problem("UNKNOWN_CONTAINER_USE", site, storagePath(references) + " <- invokedynamic capture at " + site.describe());
-                        }
                         if (touches(value, migrated)) {
                             problem("UNSUPPORTED_VALUE_USE", site, pathFor(value) + " <- invokedynamic argument at " + site.describe());
                         }
@@ -473,9 +541,6 @@ final class RepresentationSolver {
                     checkReference(constant.cst, site);
                 } else if (instruction.getOpcode() == Opcodes.ARETURN || instruction.getOpcode() == Opcodes.PUTSTATIC
                         || instruction.getOpcode() == Opcodes.PUTFIELD || instruction.getOpcode() == Opcodes.AASTORE) {
-                    if (touchesStorage(flow.topReferences(index))) {
-                        problem("ESCAPED_CONTAINER", site, storagePath(flow.topReferences(index)) + " <- storage escapes at " + site.describe());
-                    }
                     if (touches(flow.top(index), migrated)) {
                         problem("UNSUPPORTED_REFERENCE_USE", site, pathFor(flow.top(index)) + " <- reference sink at " + site.describe());
                     }
@@ -487,15 +552,6 @@ final class RepresentationSolver {
                         && cast.desc.equals("java/lang/Long"))
                         && flow.consumed.getOrDefault(instruction, Set.of()).stream().anyMatch(migrated::contains)) {
                     problem("UNSUPPORTED_VALUE_USE", site, "Migrated value reaches opcode=" + instruction.getOpcode());
-                }
-                if (!(instruction instanceof MethodInsnNode) && !(instruction instanceof VarInsnNode)
-                        && !(instruction instanceof TypeInsnNode cast && cast.getOpcode() == Opcodes.CHECKCAST)
-                        && !isReferenceCopy(instruction.getOpcode())
-                        && instruction.getOpcode() != Opcodes.INSTANCEOF
-                        && instruction.getOpcode() != Opcodes.IFNULL && instruction.getOpcode() != Opcodes.IFNONNULL
-                        && instruction.getOpcode() != Opcodes.IF_ACMPEQ && instruction.getOpcode() != Opcodes.IF_ACMPNE
-                        && touchesStorage(flow.aliases.origins(flow.consumed.getOrDefault(instruction, Set.of())))) {
-                    problem("ESCAPED_CONTAINER", site, "Unmodeled storage use opcode=" + instruction.getOpcode());
                 }
             }
         }
@@ -516,10 +572,6 @@ final class RepresentationSolver {
         Flow flow = site.flow;
         int index = site.index;
         boolean receiverPresent = call.getOpcode() != Opcodes.INVOKESTATIC;
-        if (receiverPresent && touchesStorage(flow.receiverReferences(index, call))
-                && ContainerSummary.resolve(call) == null) {
-            problem("UNKNOWN_CONTAINER_USE", site, storagePath(flow.receiverReferences(index, call)) + " <- " + symbol(call));
-        }
         if (isUnbox(call) && migrated.contains(call)) {
             helper(TypeRule.Kind.READ, site);
         }
@@ -536,10 +588,6 @@ final class RepresentationSolver {
         for (int parameter = 0; parameter < arguments.length; parameter++) {
             int parameterIndex = parameter;
             SourceValue value = flow.argument(index, call, parameter);
-            StorageReferences references = flow.argumentReferences(index, call, parameter);
-            if (touchesStorage(references)) {
-                problem("UNKNOWN_CONTAINER_USE", site, storagePath(references) + " <- argument of " + symbol(call));
-            }
             if (!touches(value, migrated)) {
                 continue;
             }
@@ -759,10 +807,12 @@ final class RepresentationSolver {
         return value != null && value.insns.stream().anyMatch(selected::contains);
     }
 
-    private static boolean isReferenceCopy(int opcode) {
-        return switch (opcode) {
+    private static boolean isContainerReferenceOperation(AbstractInsnNode instruction) {
+        return switch (instruction.getOpcode()) {
             case Opcodes.DUP, Opcodes.DUP_X1, Opcodes.DUP_X2, Opcodes.DUP2, Opcodes.DUP2_X1,
-                    Opcodes.DUP2_X2, Opcodes.SWAP -> true;
+                    Opcodes.DUP2_X2, Opcodes.SWAP, Opcodes.CHECKCAST, Opcodes.INSTANCEOF,
+                    Opcodes.IFNULL, Opcodes.IFNONNULL, Opcodes.IF_ACMPEQ, Opcodes.IF_ACMPNE,
+                    Opcodes.MONITORENTER, Opcodes.MONITOREXIT -> true;
             default -> false;
         };
     }
@@ -798,12 +848,6 @@ final class RepresentationSolver {
                 .findFirst().orElse("value migration " + migration.id());
     }
 
-    private String storagePath(StorageReferences references) {
-        return references.storages().stream().filter(this::isSelectedStorage).map(this::storagePoint)
-                .sorted(java.util.Comparator.comparing(ProgramPoint::key)).map(point -> site(point).describe())
-                .findFirst().orElse("container migration " + migration.id());
-    }
-
     private ProgramPoint firstMigratedPoint(SourceValue value) {
         return ordered(value.insns).stream().filter(migrated::contains).map(origin -> sites.get(origin).point())
                 .findFirst().orElse(new ProgramPoint(null, -1, "value migration " + migration.id()));
@@ -814,9 +858,13 @@ final class RepresentationSolver {
     }
 
     private void candidateProblem(String code, Site site, String message, List<String> candidates) {
-        String key = code + " " + site.describe();
+        candidateProblem(code, site, -1, message, candidates);
+    }
+
+    private void candidateProblem(String code, Site site, int parameter, String message, List<String> candidates) {
+        String key = code + " " + site.describe() + " parameter=" + parameter;
         if (diagnosticKeys.add(key)) {
-            issues.add(new Issue(code, site, message, candidates));
+            issues.add(new Issue(code, site, parameter, message, candidates));
         }
     }
 
@@ -839,7 +887,7 @@ final class RepresentationSolver {
             RuleRequirement requirement = requirement(issue.code);
             String sourceType = originalType.getDescriptor();
             String targetType = migration.representation().getDescriptor();
-            diagnostics.add(new Diagnostic(issue.code, issue.site.method(), Math.max(-1, issue.site.index), -1,
+            diagnostics.add(new Diagnostic(issue.code, issue.site.method(), Math.max(-1, issue.site.index), issue.parameter,
                     issue.message, migration.id(), relevant, issue.candidates,
                     migration.target(), migration.parameter(), sourceType, targetType, requirement,
                     dependencyPath(issue.site.point(), relevant), issue.site.symbol()));
