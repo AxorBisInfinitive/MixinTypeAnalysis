@@ -55,6 +55,21 @@ public class MainMixin {
 }
 ```
 
+等价源代码形态如下。这里展示的是改写后的类型关系，实际产物仍是字节码：
+
+```java
+static int lookup(BlockPos position) {
+    return (int) (position.packed() ^ (position.packed() >>> 32));
+}
+
+static int process(BlockPos position) {
+    Queue<BlockPos> queue = new ArrayDeque<>();
+    queue.add(position);
+    BlockPos next = Objects.requireNonNull(queue.remove());
+    return lookup(next);
+}
+```
+
 当传播过程遇到来源不明、无法证明兼容的容器访问或缺失规则时，MixinTA 汇总诊断并终止该批次，不发布部分改写结果。`SOURCE`、`READ` 与 `ENCODE` 规则是表示迁移的行为契约，规则实现需要保留相应的求值、空值和编码语义。
 
 ## `@TypedOverwrite` 的工作方式
