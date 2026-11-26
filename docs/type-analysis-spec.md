@@ -324,6 +324,8 @@ poll ()Ljava/lang/Object;
 
 **当前实现已提供声明准备、primitive 适配、整批改写及实际运行时接入。**
 
+声明 API 位于 `love.crysh.mixinta.anno`，包括 `TypedOverwrite`、`ParameterMigration`、`TypeRule` 和 `ContainerRule`。分析入口与改写计划位于 `love.crysh.mixinta.analysis`，共享位置与传播模型位于 `love.crysh.mixinta.model`，诊断类型和 `TypedOverwriteException` 位于 `love.crysh.mixinta.diagnostic`。Class 文件与类层次操作位于 `love.crysh.mixinta.bytecode`，Fabric 运行时接入位于 `love.crysh.mixinta.runtime`。
+
 下表对应本文编写时的代码状态。
 
 | 能力 | 当前实现 |

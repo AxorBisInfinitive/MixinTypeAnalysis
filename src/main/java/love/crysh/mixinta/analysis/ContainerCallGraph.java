@@ -1,5 +1,12 @@
 package love.crysh.mixinta.analysis;
 
+import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.bytecode.ClassHierarchy;
+import love.crysh.mixinta.model.DependencyKind;
+import love.crysh.mixinta.model.MethodKey;
+import love.crysh.mixinta.model.ProgramPoint;
+import love.crysh.mixinta.model.PropagationEdge;
+
 import org.objectweb.asm.ConstantDynamic;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;

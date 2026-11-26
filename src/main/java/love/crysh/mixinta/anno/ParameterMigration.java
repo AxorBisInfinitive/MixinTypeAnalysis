@@ -1,4 +1,4 @@
-package love.crysh.mixinta;
+package love.crysh.mixinta.anno;
 
 import java.lang.annotation.Retention;
 import java.lang.annotation.RetentionPolicy;

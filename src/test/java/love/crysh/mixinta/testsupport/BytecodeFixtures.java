@@ -1,4 +1,8 @@
-package love.crysh.mixinta.analysis;
+package love.crysh.mixinta.testsupport;
+
+import love.crysh.mixinta.analysis.PreparedOverwrites;
+import love.crysh.mixinta.analysis.TypedOverwriteAnalyzer;
+import love.crysh.mixinta.bytecode.ClassFiles;
 
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.Type;
@@ -28,11 +32,11 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
-final class BytecodeFixtures {
+public final class BytecodeFixtures {
     private BytecodeFixtures() {
     }
 
-    static Map<String, byte[]> compile(Map<String, String> sources) {
+    public static Map<String, byte[]> compile(Map<String, String> sources) {
         var compiler = ToolProvider.getSystemJavaCompiler();
         var diagnostics = new DiagnosticCollector<JavaFileObject>();
         Map<String, ByteArrayOutputStream> output = new LinkedHashMap<>();
@@ -72,16 +76,16 @@ final class BytecodeFixtures {
         return classes;
     }
 
-    static Fixture fixture(String subjectBody, String mixinBody) {
+    public static Fixture fixture(String subjectBody, String mixinBody) {
         return fixture(subjectBody, mixinBody, Map.of());
     }
 
-    static Fixture fixture(String subjectBody, String mixinBody, Map<String, String> additionalSources) {
+    public static Fixture fixture(String subjectBody, String mixinBody, Map<String, String> additionalSources) {
         Map<String, String> sources = new LinkedHashMap<>(additionalSources);
         sources.put("sample.Subject", "package sample; public final class Subject { " + subjectBody + " }");
         sources.put("sample.SubjectMixin", """
                 package sample;
-                import love.crysh.mixinta.TypedOverwrite;
+                import love.crysh.mixinta.anno.TypedOverwrite;
                 import org.spongepowered.asm.mixin.Mixin;
                 @Mixin(value = Subject.class, remap = false)
                 public class SubjectMixin {
@@ -89,7 +93,7 @@ final class BytecodeFixtures {
         return split(compile(sources));
     }
 
-    static Fixture split(Map<String, byte[]> classes) {
+    public static Fixture split(Map<String, byte[]> classes) {
         Map<String, byte[]> originals = new LinkedHashMap<>();
         Map<String, byte[]> mixins = new LinkedHashMap<>();
         classes.forEach((name, bytes) -> {
@@ -104,7 +108,7 @@ final class BytecodeFixtures {
     }
 
     /** 构造核心分析的阶段输入，只搬运测试方法并重绑定 owner。 */
-    static Map<String, byte[]> mergeForCoreTest(Fixture fixture, PreparedOverwrites preparation) {
+    public static Map<String, byte[]> mergeForCoreTest(Fixture fixture, PreparedOverwrites preparation) {
         Map<String, byte[]> classes = ClassFiles.snapshot(fixture.originals());
         for (byte[] bytes : preparation.mixins().values()) {
             ClassNode mixin = ClassFiles.read(bytes);
@@ -131,7 +135,7 @@ final class BytecodeFixtures {
         return classes;
     }
 
-    static ClassLoader loader(Map<String, byte[]> classes) {
+    public static ClassLoader loader(Map<String, byte[]> classes) {
         return new ClassLoader(BytecodeFixtures.class.getClassLoader()) {
             @Override
             protected Class<?> loadClass(String name, boolean resolve) throws ClassNotFoundException {
@@ -153,7 +157,7 @@ final class BytecodeFixtures {
         };
     }
 
-    static void verify(Map<String, byte[]> classes) {
+    public static void verify(Map<String, byte[]> classes) {
         ClassLoader loader = loader(classes);
         classes.forEach((name, bytes) -> {
             StringWriter errors = new StringWriter();
@@ -162,12 +166,12 @@ final class BytecodeFixtures {
         });
     }
 
-    record Fixture(Map<String, byte[]> originals, Map<String, byte[]> mixins) {
-        PreparedOverwrites prepare() {
+    public record Fixture(Map<String, byte[]> originals, Map<String, byte[]> mixins) {
+        public PreparedOverwrites prepare() {
             return new TypedOverwriteAnalyzer().prepare(originals, mixins);
         }
 
-        Map<String, byte[]> transform() {
+        public Map<String, byte[]> transform() {
             PreparedOverwrites preparation = prepare();
             return preparation.analyze(mergeForCoreTest(this, preparation)).apply();
         }

@@ -1,5 +1,10 @@
 package love.crysh.mixinta.analysis;
 
+import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.diagnostic.DiagnosticVerbosity;
+import love.crysh.mixinta.diagnostic.TypedOverwriteException;
+import love.crysh.mixinta.testsupport.BytecodeFixtures;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -49,11 +54,11 @@ class TypedCustomContainerTest {
             @ContainerRule(method="sample.BoxView.get(I)Ljava/lang/Object;", operation=ContainerRule.Operation.READ)
             """;
     private static final String HELPERS = """
-            @love.crysh.mixinta.TypeRule(value=love.crysh.mixinta.TypeRule.Kind.SOURCE, method="sample.BlockPos.asLong()J")
+            @love.crysh.mixinta.anno.TypeRule(value=love.crysh.mixinta.anno.TypeRule.Kind.SOURCE, method="sample.BlockPos.asLong()J")
             public static BlockPos keep(BlockPos value) { return java.util.Objects.requireNonNull(value); }
-            @love.crysh.mixinta.TypeRule(love.crysh.mixinta.TypeRule.Kind.READ)
+            @love.crysh.mixinta.anno.TypeRule(love.crysh.mixinta.anno.TypeRule.Kind.READ)
             public static BlockPos read(BlockPos value) { return java.util.Objects.requireNonNull(value); }
-            @love.crysh.mixinta.TypeRule(love.crysh.mixinta.TypeRule.Kind.ENCODE)
+            @love.crysh.mixinta.anno.TypeRule(love.crysh.mixinta.anno.TypeRule.Kind.ENCODE)
             public static long encode(BlockPos value) { return value.value(); }
             """;
 
@@ -66,14 +71,14 @@ class TypedCustomContainerTest {
         extra.put("sample.BlockPos", "package sample; public record BlockPos(long value) { public long asLong() { return value; } }");
         extra.put("sample.Box", BOX);
         extra.put("sample.BoxView", "package sample; public final class BoxView<T> { private final Box<T> box; public BoxView(Box<T> box){this.box=box;} public T get(int index){return box.get(index);} }");
-        extra.put("sample.Rules", "package sample; import love.crysh.mixinta.ContainerRule; " + declarations + " public class Rules {" + HELPERS + "}");
+        extra.put("sample.Rules", "package sample; import love.crysh.mixinta.anno.ContainerRule; " + declarations + " public class Rules {" + HELPERS + "}");
         return BytecodeFixtures.fixture("""
                 public static int sources;
                 public static BlockPos position(long value) { sources++; return new BlockPos(value); }
                 public static int lookup(long value) { return (int)value; }
                 public static long run(boolean flag) {
                 """ + body + "}" + members, """
-                @TypedOverwrite(method="lookup(J)I", parameters=@love.crysh.mixinta.ParameterMigration(parameter=0, rules=Rules.class))
+                @TypedOverwrite(method="lookup(J)I", parameters=@love.crysh.mixinta.anno.ParameterMigration(parameter=0, rules=Rules.class))
                 public static int lookup(BlockPos value) { return (int)value.value(); }
                 """, extra);
     }
@@ -256,12 +261,12 @@ class TypedCustomContainerTest {
         assertEquals(2, failure.diagnostics().stream().filter(diagnostic -> diagnostic.code().equals("INVALID_CONTAINER_RULE")).count());
         var conflicting = fixture("Box<Long> box = new Box<>(); box.put(position(12).asLong()); return lookup(box.get(0)) + other(3L);",
                 "public static int other(long value){return (int)value;}", MODELS, Map.of(
-                        "sample.OtherRules", "package sample; import love.crysh.mixinta.ContainerRule; @ContainerRule(method=\"sample.Box.get(I)Ljava/lang/Object;\", operation=ContainerRule.Operation.READ_REMOVE) public class OtherRules {}",
+                        "sample.OtherRules", "package sample; import love.crysh.mixinta.anno.ContainerRule; @ContainerRule(method=\"sample.Box.get(I)Ljava/lang/Object;\", operation=ContainerRule.Operation.READ_REMOVE) public class OtherRules {}",
                         "sample.OtherMixin", """
                                 package sample;
                                 @org.spongepowered.asm.mixin.Mixin(value=Subject.class, remap=false)
                                 public class OtherMixin {
-                                    @love.crysh.mixinta.TypedOverwrite(method="other(J)I", parameters=@love.crysh.mixinta.ParameterMigration(parameter=0, rules=OtherRules.class))
+                                    @love.crysh.mixinta.anno.TypedOverwrite(method="other(J)I", parameters=@love.crysh.mixinta.anno.ParameterMigration(parameter=0, rules=OtherRules.class))
                                     public static int other(BlockPos value) { return (int)value.value(); }
                                 }
                                 """));
@@ -276,11 +281,11 @@ class TypedCustomContainerTest {
         var base = fixture("Box<Long> box = new Box<>(); box.put(position(12).asLong()); return lookup(box.get(0));", "", "");
         var mixin = BytecodeFixtures.compile(Map.of("sample.SubjectMixin", """
                 package sample;
-                import love.crysh.mixinta.ContainerRule;
+                import love.crysh.mixinta.anno.ContainerRule;
                 @org.spongepowered.asm.mixin.Mixin(value=Subject.class, remap=false)
                 """ + MODELS + """
                 public class SubjectMixin {
-                    @love.crysh.mixinta.TypedOverwrite(method="lookup(J)I", parameters=@love.crysh.mixinta.ParameterMigration(parameter=0, rules=SubjectMixin.class))
+                    @love.crysh.mixinta.anno.TypedOverwrite(method="lookup(J)I", parameters=@love.crysh.mixinta.anno.ParameterMigration(parameter=0, rules=SubjectMixin.class))
                     public static int lookup(BlockPos value) { return (int)value.value(); }
                 """ + HELPERS + "}",
                 "sample.BlockPos", "package sample; public record BlockPos(long value) { public long asLong(){return value;} }",

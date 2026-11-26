@@ -1,5 +1,8 @@
 package love.crysh.mixinta.analysis;
 
+import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.testsupport.BytecodeFixtures;
+
 import org.junit.jupiter.api.Test;
 
 import java.util.LinkedHashMap;
@@ -15,9 +18,9 @@ class TypedRepresentationTest {
         sources.put("sample.Subject", "package sample; public final class Subject { public static int lookup(long value){return (int)value;} public static int run(long value){return lookup(new BlockPos(value).asLong());} }");
         sources.put("sample.SubjectMixin", """
                 package sample;
-                import love.crysh.mixinta.ParameterMigration;
-                import love.crysh.mixinta.TypeRule;
-                import love.crysh.mixinta.TypedOverwrite;
+                import love.crysh.mixinta.anno.ParameterMigration;
+                import love.crysh.mixinta.anno.TypeRule;
+                import love.crysh.mixinta.anno.TypedOverwrite;
                 import org.spongepowered.asm.mixin.Mixin;
                 @Mixin(value=Subject.class, remap=false)
                 public class SubjectMixin {

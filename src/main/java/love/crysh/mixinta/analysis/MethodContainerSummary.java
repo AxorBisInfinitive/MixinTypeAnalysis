@@ -1,5 +1,8 @@
 package love.crysh.mixinta.analysis;
 
+import love.crysh.mixinta.model.MethodKey;
+import love.crysh.mixinta.model.ProgramPoint;
+
 import java.util.List;
 import java.util.Set;
 

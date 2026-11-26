@@ -23,7 +23,28 @@ mvn -f exp-fabric-testmod/pom.xml clean package
 
 ## TypedOverwrite 核心
 
-`love.crysh.mixinta.TypedOverwrite` 声明原方法与替换实现。`method` 使用原方法名和完整 JVM 描述符。
+`love.crysh.mixinta.anno.TypedOverwrite` 声明原方法与替换实现。`method` 使用原方法名和完整 JVM 描述符。
+
+四个声明注解统一位于 `love.crysh.mixinta.anno`。
+
+```java
+import love.crysh.mixinta.anno.ContainerRule;
+import love.crysh.mixinta.anno.ParameterMigration;
+import love.crysh.mixinta.anno.TypeRule;
+import love.crysh.mixinta.anno.TypedOverwrite;
+```
+
+| 包 | 职责 |
+| --- | --- |
+| `love.crysh.mixinta.anno` | TypedOverwrite、参数迁移、表示规则和容器规则注解 |
+| `love.crysh.mixinta.model` | 方法标识、程序位置、传播依赖和变更记录 |
+| `love.crysh.mixinta.bytecode` | Class 文件读写、类层次查询和 primitive 转换 |
+| `love.crysh.mixinta.diagnostic` | 结构化诊断、异常和输出格式 |
+| `love.crysh.mixinta.analysis` | 声明准备、规则校验、传播求解和改写计划 |
+| `love.crysh.mixinta.runtime` | Mixin 生命周期接入和批次发布 |
+| `love.crysh.mixinta.runtime.agent` | agent 附加和跨 ClassLoader 回调 |
+
+使用旧包名的源码需要更新 import 并重新编译，使 class 文件中的注解描述符指向 `anno` 包。
 
 ```java
 @Mixin(value = Example.class, remap = false)
@@ -82,6 +103,10 @@ public class ExampleMixin {
 核心 API 接收一个 ClassLoader 对应的固定类集合，Map 的键使用 JVM 内部类名。调用方负责提供完整的参与类集合。
 
 ```java
+import love.crysh.mixinta.analysis.PreparedOverwrites;
+import love.crysh.mixinta.analysis.TransformationPlan;
+import love.crysh.mixinta.analysis.TypedOverwriteAnalyzer;
+
 TypedOverwriteAnalyzer analyzer = new TypedOverwriteAnalyzer();
 PreparedOverwrites prepared = analyzer.prepare(originalClasses, mixinClasses);
 Map<String, byte[]> preparedMixins = prepared.mixins();

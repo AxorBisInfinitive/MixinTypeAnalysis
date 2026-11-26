@@ -1,6 +1,11 @@
 package love.crysh.mixinta.analysis;
 
-import love.crysh.mixinta.TypeRule;
+import love.crysh.mixinta.anno.TypeRule;
+import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.bytecode.ClassHierarchy;
+import love.crysh.mixinta.diagnostic.Diagnostic;
+import love.crysh.mixinta.model.MethodKey;
+
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AnnotationNode;
@@ -15,7 +20,7 @@ import java.util.Set;
 import java.util.TreeSet;
 
 final class RepresentationRules {
-    static final String RULE = "Llove/crysh/mixinta/TypeRule;";
+    static final String RULE = "Llove/crysh/mixinta/anno/TypeRule;";
 
     private RepresentationRules() {
     }

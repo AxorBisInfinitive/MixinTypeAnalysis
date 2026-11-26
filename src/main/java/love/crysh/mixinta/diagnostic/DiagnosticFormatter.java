@@ -1,4 +1,8 @@
-package love.crysh.mixinta.analysis;
+package love.crysh.mixinta.diagnostic;
+
+import love.crysh.mixinta.model.MethodKey;
+import love.crysh.mixinta.model.ProgramPoint;
+import love.crysh.mixinta.model.PropagationEdge;
 
 import org.objectweb.asm.Type;
 

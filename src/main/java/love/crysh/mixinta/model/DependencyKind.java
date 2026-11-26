@@ -1,4 +1,4 @@
-package love.crysh.mixinta.analysis;
+package love.crysh.mixinta.model;
 
 /** 传播边产生的操作类别。 */
 public enum DependencyKind {

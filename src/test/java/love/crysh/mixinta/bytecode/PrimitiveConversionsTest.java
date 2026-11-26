@@ -1,4 +1,6 @@
-package love.crysh.mixinta.analysis;
+package love.crysh.mixinta.bytecode;
+
+import love.crysh.mixinta.testsupport.BytecodeFixtures;
 
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.Test;

@@ -1,6 +1,17 @@
 package love.crysh.mixinta.analysis;
 
-import love.crysh.mixinta.TypeRule;
+import love.crysh.mixinta.anno.TypeRule;
+import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.bytecode.ClassHierarchy;
+import love.crysh.mixinta.diagnostic.DependencyStep;
+import love.crysh.mixinta.diagnostic.Diagnostic;
+import love.crysh.mixinta.diagnostic.RuleRequirement;
+import love.crysh.mixinta.model.DependencyKind;
+import love.crysh.mixinta.model.MethodKey;
+import love.crysh.mixinta.model.PlanChange;
+import love.crysh.mixinta.model.ProgramPoint;
+import love.crysh.mixinta.model.PropagationEdge;
+
 import org.objectweb.asm.ConstantDynamic;
 import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;

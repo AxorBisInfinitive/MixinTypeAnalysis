@@ -1,5 +1,9 @@
 package love.crysh.mixinta.analysis;
 
+import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.diagnostic.TypedOverwriteException;
+import love.crysh.mixinta.testsupport.BytecodeFixtures;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.Arguments;
@@ -69,7 +73,7 @@ class TypedOverwriteAnalyzerTest {
                         package sample;
                         @org.spongepowered.asm.mixin.Mixin(value = Subject.class, priority = 900)
                         public class Low {
-                            @love.crysh.mixinta.TypedOverwrite
+                            @love.crysh.mixinta.anno.TypedOverwrite
                             public static int div(int a, int b) { return 1; }
                         }
                         """,
@@ -77,7 +81,7 @@ class TypedOverwriteAnalyzerTest {
                         package sample;
                         @org.spongepowered.asm.mixin.Mixin(value = Subject.class, priority = 1100)
                         public class High {
-                            @love.crysh.mixinta.TypedOverwrite
+                            @love.crysh.mixinta.anno.TypedOverwrite
                             public static int div(int a, int b) { return 2; }
                         }
                         """));
@@ -275,7 +279,7 @@ class TypedOverwriteAnalyzerTest {
                         package sample;
                         @org.spongepowered.asm.mixin.Mixin(Subject.class)
                         public class SubjectMixin {
-                            @love.crysh.mixinta.TypedOverwrite
+                            @love.crysh.mixinta.anno.TypedOverwrite
                             public static int div(double a, double b) { return (int) (a / b * 10); }
                         }
                         """)));
@@ -351,7 +355,7 @@ class TypedOverwriteAnalyzerTest {
                         package sample;
                         @org.spongepowered.asm.mixin.Mixin(Subject.class)
                         public class FirstMixin {
-                            @love.crysh.mixinta.TypedOverwrite(method = "div(I)I")
+                            @love.crysh.mixinta.anno.TypedOverwrite(method = "div(I)I")
                             public static int div(double value) { return 1; }
                         }
                         """,
@@ -359,7 +363,7 @@ class TypedOverwriteAnalyzerTest {
                         package sample;
                         @org.spongepowered.asm.mixin.Mixin(Subject.class)
                         public class SecondMixin {
-                            @love.crysh.mixinta.TypedOverwrite(method = "div(J)I")
+                            @love.crysh.mixinta.anno.TypedOverwrite(method = "div(J)I")
                             public static int div(double value) { return 2; }
                         }
                         """)));
@@ -482,7 +486,7 @@ class TypedOverwriteAnalyzerTest {
                         package sample;
                         @org.spongepowered.asm.mixin.Mixin(Subject.class)
                         public class SubjectMixin {
-                            @love.crysh.mixinta.TypedOverwrite
+                            @love.crysh.mixinta.anno.TypedOverwrite
                             public int div(double a, double b) { return 1; }
                         }
                         """)));

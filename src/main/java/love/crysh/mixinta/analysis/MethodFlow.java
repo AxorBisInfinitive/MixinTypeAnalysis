@@ -1,5 +1,8 @@
 package love.crysh.mixinta.analysis;
 
+import love.crysh.mixinta.model.MethodKey;
+import love.crysh.mixinta.model.ProgramPoint;
+
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;

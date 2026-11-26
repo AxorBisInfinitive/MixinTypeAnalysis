@@ -1,4 +1,6 @@
-package love.crysh.mixinta.analysis;
+package love.crysh.mixinta.bytecode;
+
+import love.crysh.mixinta.model.MethodKey;
 
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
@@ -15,20 +17,20 @@ import java.util.Map;
 import java.util.Set;
 
 /** 从字节码读取层次信息，计算栈帧期间避免定义或初始化被分析的类。 */
-final class ClassHierarchy {
+public final class ClassHierarchy {
     private final Map<String, ClassNode> classes;
     private final ClassLoader resources;
 
-    ClassHierarchy(Map<String, ClassNode> classes, ClassLoader resources) {
+    public ClassHierarchy(Map<String, ClassNode> classes, ClassLoader resources) {
         this.classes = new HashMap<>(classes);
         this.resources = resources;
     }
 
-    ClassNode get(String name) {
+    public ClassNode get(String name) {
         return classes.computeIfAbsent(name, this::readResource);
     }
 
-    MethodKey resolve(String owner, String name, String descriptor) {
+    public MethodKey resolve(String owner, String name, String descriptor) {
         Set<String> visited = new HashSet<>();
         ArrayDeque<String> pending = new ArrayDeque<>();
         pending.add(owner);
@@ -49,7 +51,7 @@ final class ClassHierarchy {
         return null;
     }
 
-    boolean hasInheritedMethod(ClassNode node, String name, String descriptor) {
+    public boolean hasInheritedMethod(ClassNode node, String name, String descriptor) {
         if (node.superName != null && isInherited(node, resolve(node.superName, name, descriptor))) {
             return true;
         }
@@ -57,7 +59,7 @@ final class ClassHierarchy {
     }
 
     /** 实例派发先选择类方法，再选择最具体接口中的唯一 default 实现。 */
-    MethodKey resolveVirtual(String owner, String name, String descriptor) {
+    public MethodKey resolveVirtual(String owner, String name, String descriptor) {
         Set<String> interfaces = new HashSet<>();
         Set<String> visited = new HashSet<>();
         String current = owner;
@@ -108,7 +110,7 @@ final class ClassHierarchy {
         return separator < 0 ? "" : name.substring(0, separator);
     }
 
-    ClassWriter writer() {
+    public ClassWriter writer() {
         return new ClassWriter(ClassWriter.COMPUTE_FRAMES | ClassWriter.COMPUTE_MAXS) {
             @Override
             protected String getCommonSuperClass(String first, String second) {
@@ -149,7 +151,7 @@ final class ClassHierarchy {
         return "java/lang/Object";
     }
 
-    boolean isAssignable(String destination, String source) {
+    public boolean isAssignable(String destination, String source) {
         if (destination.equals(source) || destination.equals("java/lang/Object")) {
             return true;
         }

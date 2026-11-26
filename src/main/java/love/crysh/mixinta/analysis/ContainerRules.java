@@ -1,5 +1,10 @@
 package love.crysh.mixinta.analysis;
 
+import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.bytecode.ClassHierarchy;
+import love.crysh.mixinta.diagnostic.Diagnostic;
+import love.crysh.mixinta.model.MethodKey;
+
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AnnotationNode;
@@ -15,8 +20,8 @@ import java.util.Set;
 
 /** 自定义契约以精确方法键注册，内置摘要与自定义摘要共用同一求解路径。 */
 final class ContainerRules {
-    private static final String RULE = "Llove/crysh/mixinta/ContainerRule;";
-    private static final String LIST = "Llove/crysh/mixinta/ContainerRule$List;";
+    private static final String RULE = "Llove/crysh/mixinta/anno/ContainerRule;";
+    private static final String LIST = "Llove/crysh/mixinta/anno/ContainerRule$List;";
 
     record Definition(String id, int version, MethodKey method, ContainerSummary summary) {
     }
@@ -51,7 +56,7 @@ final class ContainerRules {
                     throw new IllegalArgumentException("Invalid version, duplicate id or duplicate method " + id + " " + method);
                 }
                 String operationName = enumValue(declaration, "operation", "");
-                love.crysh.mixinta.ContainerRule.Operation.valueOf(operationName);
+                love.crysh.mixinta.anno.ContainerRule.Operation.valueOf(operationName);
                 ContainerOperation operation = ContainerOperation.valueOf(operationName);
                 int channel = (int) ClassFiles.value(declaration, "channel", 0);
                 int element = (int) ClassFiles.value(declaration, "parameter", -1);

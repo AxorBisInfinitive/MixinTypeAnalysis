@@ -28,15 +28,15 @@ class TypedOverwriteIT {
     private static final Path PROJECT = Path.of(System.getProperty("project.directory")).toAbsolutePath();
     private static final String SUBJECT = "love.crysh.exp.Subject";
     private static final String MIXIN_PACKAGE = "fixture.mixin";
-    private static final String TYPED = "@love.crysh.mixinta.TypedOverwrite(method=\"div(II)I\")";
+    private static final String TYPED = "@love.crysh.mixinta.anno.TypedOverwrite(method=\"div(II)I\")";
     private static final String REFERENCE_MIXIN = """
-            @love.crysh.mixinta.TypedOverwrite(method="lookup(J)I", parameters=@love.crysh.mixinta.ParameterMigration(parameter=0, rules=SubjectMixin.class))
+            @love.crysh.mixinta.anno.TypedOverwrite(method="lookup(J)I", parameters=@love.crysh.mixinta.anno.ParameterMigration(parameter=0, rules=SubjectMixin.class))
             public static int lookup(love.crysh.exp.BlockPos value){return (int)value.value();}
-            @love.crysh.mixinta.TypeRule(value=love.crysh.mixinta.TypeRule.Kind.SOURCE, method="love.crysh.exp.BlockPos.asLong()J")
+            @love.crysh.mixinta.anno.TypeRule(value=love.crysh.mixinta.anno.TypeRule.Kind.SOURCE, method="love.crysh.exp.BlockPos.asLong()J")
             private static love.crysh.exp.BlockPos keep(love.crysh.exp.BlockPos value){return value;}
-            @love.crysh.mixinta.TypeRule(value=love.crysh.mixinta.TypeRule.Kind.ENCODE)
+            @love.crysh.mixinta.anno.TypeRule(value=love.crysh.mixinta.anno.TypeRule.Kind.ENCODE)
             private static long encode(love.crysh.exp.BlockPos value){return value.value();}
-            @love.crysh.mixinta.TypeRule(value=love.crysh.mixinta.TypeRule.Kind.READ)
+            @love.crysh.mixinta.anno.TypeRule(value=love.crysh.mixinta.anno.TypeRule.Kind.READ)
             private static love.crysh.exp.BlockPos read(love.crysh.exp.BlockPos value){return java.util.Objects.requireNonNull(value);}
             """;
 
@@ -72,7 +72,7 @@ class TypedOverwriteIT {
                     throw new AssertionError("Old descriptor survived");
                 } catch (NoSuchMethodException expected) { }
                 System.out.println("INTRODUCED=" + Subject.class.getMethod("introduced").invoke(new Subject()));
-                System.out.println("ROOT_LOADER=" + love.crysh.mixinta.TypedOverwrite.class.getClassLoader().getName());
+                System.out.println("ROOT_LOADER=" + love.crysh.mixinta.anno.TypedOverwrite.class.getClassLoader().getName());
                 try (var isolated = new java.net.URLClassLoader(
                         new java.net.URL[]{Subject.class.getProtectionDomain().getCodeSource().getLocation()},
                         ClassLoader.getPlatformClassLoader())) {
@@ -403,10 +403,10 @@ class TypedOverwriteIT {
     @ValueSource(strings = {"mixin", "external", "invalid", "escape"})
     void usesCustomContainerContractsThroughRuntime(String scenario) throws Exception {
         String declarations = """
-                @love.crysh.mixinta.ContainerRule(method="love.crysh.exp.Box.<init>()V", operation=love.crysh.mixinta.ContainerRule.Operation.ALLOCATE)
-                @love.crysh.mixinta.ContainerRule(method="love.crysh.exp.Box.put(Ljava/lang/Object;)V", operation=love.crysh.mixinta.ContainerRule.Operation.WRITE, parameter=%d)
-                @love.crysh.mixinta.ContainerRule(method="love.crysh.exp.Box.get(I)Ljava/lang/Object;", operation=love.crysh.mixinta.ContainerRule.Operation.READ)
-                @love.crysh.mixinta.ContainerRule(method="love.crysh.exp.Box.view()Ljava/util/List;", operation=love.crysh.mixinta.ContainerRule.Operation.VIEW, view=love.crysh.mixinta.ContainerRule.View.LIST)
+                @love.crysh.mixinta.anno.ContainerRule(method="love.crysh.exp.Box.<init>()V", operation=love.crysh.mixinta.anno.ContainerRule.Operation.ALLOCATE)
+                @love.crysh.mixinta.anno.ContainerRule(method="love.crysh.exp.Box.put(Ljava/lang/Object;)V", operation=love.crysh.mixinta.anno.ContainerRule.Operation.WRITE, parameter=%d)
+                @love.crysh.mixinta.anno.ContainerRule(method="love.crysh.exp.Box.get(I)Ljava/lang/Object;", operation=love.crysh.mixinta.anno.ContainerRule.Operation.READ)
+                @love.crysh.mixinta.anno.ContainerRule(method="love.crysh.exp.Box.view()Ljava/util/List;", operation=love.crysh.mixinta.anno.ContainerRule.Operation.VIEW, view=love.crysh.mixinta.anno.ContainerRule.View.LIST)
                 """.formatted(scenario.equals("invalid") ? 1 : 0);
         Map<String, String> app = new LinkedHashMap<>();
         app.put("love.crysh.exp.BlockPos", "package love.crysh.exp; public record BlockPos(long value) { public long asLong(){return value;} }");
@@ -467,7 +467,7 @@ class TypedOverwriteIT {
         if (scenario.equals("external")) {
             source = source.replace("rules=SubjectMixin.class", "rules=fixture.Rules.class");
             String rules = "package fixture; " + declarations + " public class Rules {"
-                    + REFERENCE_MIXIN.substring(REFERENCE_MIXIN.indexOf("@love.crysh.mixinta.TypeRule"))
+                    + REFERENCE_MIXIN.substring(REFERENCE_MIXIN.indexOf("@love.crysh.mixinta.anno.TypeRule"))
                     .replace("private static", "public static") + "}";
             helpers = Map.of("fixture.Rules", rules);
         } else {

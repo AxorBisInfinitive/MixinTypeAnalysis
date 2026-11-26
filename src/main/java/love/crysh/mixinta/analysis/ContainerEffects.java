@@ -1,5 +1,7 @@
 package love.crysh.mixinta.analysis;
 
+import love.crysh.mixinta.model.ProgramPoint;
+
 import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;

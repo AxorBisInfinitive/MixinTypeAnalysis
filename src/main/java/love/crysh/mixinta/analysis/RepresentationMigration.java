@@ -1,7 +1,9 @@
 package love.crysh.mixinta.analysis;
 
+import love.crysh.mixinta.anno.TypeRule;
+import love.crysh.mixinta.model.MethodKey;
+
 import org.objectweb.asm.Type;
-import love.crysh.mixinta.TypeRule;
 
 import java.util.List;
 

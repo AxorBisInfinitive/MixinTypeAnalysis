@@ -1,5 +1,9 @@
 package love.crysh.mixinta.analysis;
 
+import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.model.MethodKey;
+import love.crysh.mixinta.testsupport.BytecodeFixtures;
+
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.Opcodes;
 

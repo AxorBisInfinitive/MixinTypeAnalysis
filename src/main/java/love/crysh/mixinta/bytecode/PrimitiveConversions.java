@@ -1,4 +1,4 @@
-package love.crysh.mixinta.analysis;
+package love.crysh.mixinta.bytecode;
 
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
@@ -44,7 +44,7 @@ public final class PrimitiveConversions {
         return List.copyOf(instructions);
     }
 
-    static int computationalSort(Type type) {
+    public static int computationalSort(Type type) {
         if (type.getSort() == Type.ARRAY) {
             return Type.OBJECT;
         }

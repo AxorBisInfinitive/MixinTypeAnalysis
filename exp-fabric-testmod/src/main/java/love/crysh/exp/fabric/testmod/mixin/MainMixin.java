@@ -1,8 +1,8 @@
 package love.crysh.exp.fabric.testmod.mixin;
 
-import love.crysh.mixinta.TypedOverwrite;
-import love.crysh.mixinta.ParameterMigration;
-import love.crysh.mixinta.TypeRule;
+import love.crysh.mixinta.anno.ParameterMigration;
+import love.crysh.mixinta.anno.TypeRule;
+import love.crysh.mixinta.anno.TypedOverwrite;
 
 import org.spongepowered.asm.mixin.Mixin;
 import org.spongepowered.asm.mixin.Overwrite;

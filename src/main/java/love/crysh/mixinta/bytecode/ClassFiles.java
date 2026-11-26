@@ -1,4 +1,7 @@
-package love.crysh.mixinta.analysis;
+package love.crysh.mixinta.bytecode;
+
+import love.crysh.mixinta.diagnostic.Diagnostic;
+import love.crysh.mixinta.diagnostic.TypedOverwriteException;
 
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
@@ -11,29 +14,29 @@ import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
-final class ClassFiles {
-    static final String TYPED_OVERWRITE = "Llove/crysh/mixinta/TypedOverwrite;";
-    static final String OVERWRITE = "Lorg/spongepowered/asm/mixin/Overwrite;";
-    static final String MIXIN = "Lorg/spongepowered/asm/mixin/Mixin;";
-    static final String FINAL = "Lorg/spongepowered/asm/mixin/Final;";
-    static final String MERGED = "Lorg/spongepowered/asm/mixin/transformer/meta/MixinMerged;";
+public final class ClassFiles {
+    public static final String TYPED_OVERWRITE = "Llove/crysh/mixinta/anno/TypedOverwrite;";
+    public static final String OVERWRITE = "Lorg/spongepowered/asm/mixin/Overwrite;";
+    public static final String MIXIN = "Lorg/spongepowered/asm/mixin/Mixin;";
+    public static final String FINAL = "Lorg/spongepowered/asm/mixin/Final;";
+    public static final String MERGED = "Lorg/spongepowered/asm/mixin/transformer/meta/MixinMerged;";
 
     private ClassFiles() {
     }
 
-    static Map<String, byte[]> snapshot(Map<String, byte[]> classes) {
+    public static Map<String, byte[]> snapshot(Map<String, byte[]> classes) {
         Map<String, byte[]> copy = new TreeMap<>();
         classes.forEach((name, bytes) -> copy.put(name, bytes.clone()));
         return copy;
     }
 
-    static ClassNode read(byte[] bytes) {
+    public static ClassNode read(byte[] bytes) {
         ClassNode node = new ClassNode();
         new ClassReader(bytes).accept(node, 0);
         return node;
     }
 
-    static Map<String, ClassNode> readAll(Map<String, byte[]> classes, List<Diagnostic> diagnostics) {
+    public static Map<String, ClassNode> readAll(Map<String, byte[]> classes, List<Diagnostic> diagnostics) {
         Map<String, ClassNode> nodes = new LinkedHashMap<>();
         classes.forEach((name, bytes) -> {
             try {
@@ -51,20 +54,20 @@ final class ClassFiles {
         return nodes;
     }
 
-    static MethodNode findMethod(ClassNode owner, String name, String descriptor) {
+    public static MethodNode findMethod(ClassNode owner, String name, String descriptor) {
         return owner.methods.stream()
                 .filter(method -> method.name.equals(name) && method.desc.equals(descriptor))
                 .findFirst().orElse(null);
     }
 
-    static AnnotationNode annotation(List<AnnotationNode> annotations, String descriptor) {
+    public static AnnotationNode annotation(List<AnnotationNode> annotations, String descriptor) {
         if (annotations == null) {
             return null;
         }
         return annotations.stream().filter(annotation -> annotation.desc.equals(descriptor)).findFirst().orElse(null);
     }
 
-    static Object value(AnnotationNode annotation, String name, Object fallback) {
+    public static Object value(AnnotationNode annotation, String name, Object fallback) {
         if (annotation == null || annotation.values == null) {
             return fallback;
         }
@@ -76,13 +79,13 @@ final class ClassFiles {
         return fallback;
     }
 
-    static byte[] write(ClassNode node) {
+    public static byte[] write(ClassNode node) {
         ClassWriter writer = new ClassWriter(0);
         node.accept(writer);
         return writer.toByteArray();
     }
 
-    static void throwIfErrors(List<Diagnostic> diagnostics) {
+    public static void throwIfErrors(List<Diagnostic> diagnostics) {
         if (!diagnostics.isEmpty()) {
             throw new TypedOverwriteException(diagnostics);
         }

@@ -1,5 +1,15 @@
 package love.crysh.mixinta.analysis;
 
+import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.diagnostic.DependencyStep;
+import love.crysh.mixinta.diagnostic.Diagnostic;
+import love.crysh.mixinta.diagnostic.DiagnosticVerbosity;
+import love.crysh.mixinta.diagnostic.RuleRequirement;
+import love.crysh.mixinta.diagnostic.TypedOverwriteException;
+import love.crysh.mixinta.model.MethodKey;
+import love.crysh.mixinta.model.PropagationEdge;
+import love.crysh.mixinta.testsupport.BytecodeFixtures;
+
 import org.junit.jupiter.api.Test;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.MethodInsnNode;

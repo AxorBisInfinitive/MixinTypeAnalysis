@@ -1,4 +1,4 @@
-package love.crysh.mixinta.analysis;
+package love.crysh.mixinta.diagnostic;
 
 import java.util.Comparator;
 import java.util.List;

@@ -1,5 +1,11 @@
 package love.crysh.mixinta.analysis;
 
+import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.diagnostic.DiagnosticVerbosity;
+import love.crysh.mixinta.diagnostic.TypedOverwriteException;
+import love.crysh.mixinta.model.DependencyKind;
+import love.crysh.mixinta.testsupport.BytecodeFixtures;
+
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.MethodSource;
@@ -206,11 +212,11 @@ class TypedContainerCallGraphTest {
                     return result + lookup(q.poll());
                 }
                 """, """
-                @TypedOverwrite(method="lookup(J)I", parameters=@love.crysh.mixinta.ParameterMigration(parameter=0, rules=SubjectMixin.class))
+                @TypedOverwrite(method="lookup(J)I", parameters=@love.crysh.mixinta.anno.ParameterMigration(parameter=0, rules=SubjectMixin.class))
                 public static int lookup(BlockPos value) { return (int)value.value(); }
-                @love.crysh.mixinta.TypeRule(value=love.crysh.mixinta.TypeRule.Kind.SOURCE, method="sample.BlockPos.asLong()J")
+                @love.crysh.mixinta.anno.TypeRule(value=love.crysh.mixinta.anno.TypeRule.Kind.SOURCE, method="sample.BlockPos.asLong()J")
                 private static BlockPos keep(BlockPos value) { return value; }
-                @love.crysh.mixinta.TypeRule(love.crysh.mixinta.TypeRule.Kind.READ)
+                @love.crysh.mixinta.anno.TypeRule(love.crysh.mixinta.anno.TypeRule.Kind.READ)
                 private static BlockPos read(BlockPos value) { return java.util.Objects.requireNonNull(value); }
                 """, Map.of(
                 "sample.BlockPos", "package sample; public record BlockPos(long value) { public long asLong() { return value; } }",
@@ -280,13 +286,13 @@ class TypedContainerCallGraphTest {
                     return result + lookup(q.peek()) + other.Worker.oldRead(q);
                 }
                 """, """
-                @TypedOverwrite(method="lookup(J)I", parameters=@love.crysh.mixinta.ParameterMigration(parameter=0, rules=SubjectMixin.class))
+                @TypedOverwrite(method="lookup(J)I", parameters=@love.crysh.mixinta.anno.ParameterMigration(parameter=0, rules=SubjectMixin.class))
                 public static int lookup(BlockPos value) { return (int)value.value(); }
-                @love.crysh.mixinta.TypeRule(value=love.crysh.mixinta.TypeRule.Kind.SOURCE, method="sample.BlockPos.asLong()J")
+                @love.crysh.mixinta.anno.TypeRule(value=love.crysh.mixinta.anno.TypeRule.Kind.SOURCE, method="sample.BlockPos.asLong()J")
                 private static BlockPos keep(BlockPos value) { return java.util.Objects.requireNonNull(value); }
-                @love.crysh.mixinta.TypeRule(love.crysh.mixinta.TypeRule.Kind.READ)
+                @love.crysh.mixinta.anno.TypeRule(love.crysh.mixinta.anno.TypeRule.Kind.READ)
                 private static BlockPos read(BlockPos value) { return java.util.Objects.requireNonNull(value); }
-                @love.crysh.mixinta.TypeRule(love.crysh.mixinta.TypeRule.Kind.ENCODE)
+                @love.crysh.mixinta.anno.TypeRule(love.crysh.mixinta.anno.TypeRule.Kind.ENCODE)
                 private static long encode(BlockPos value) { return value.value(); }
                 """, Map.of(
                 "sample.BlockPos", "package sample; public record BlockPos(long value) { public long asLong() { return value; } }",

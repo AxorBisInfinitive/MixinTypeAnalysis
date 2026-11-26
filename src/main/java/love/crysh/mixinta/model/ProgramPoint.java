@@ -1,4 +1,4 @@
-package love.crysh.mixinta.analysis;
+package love.crysh.mixinta.model;
 
 import java.util.Objects;
 

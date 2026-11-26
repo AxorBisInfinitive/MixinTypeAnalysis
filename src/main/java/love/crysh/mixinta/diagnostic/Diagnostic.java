@@ -1,4 +1,7 @@
-package love.crysh.mixinta.analysis;
+package love.crysh.mixinta.diagnostic;
+
+import love.crysh.mixinta.model.MethodKey;
+import love.crysh.mixinta.model.PropagationEdge;
 
 import java.util.List;
 

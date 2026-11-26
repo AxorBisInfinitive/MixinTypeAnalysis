@@ -1,6 +1,11 @@
 package love.crysh.mixinta.analysis;
 
-import love.crysh.mixinta.TypeRule;
+import love.crysh.mixinta.anno.TypeRule;
+import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.model.MethodKey;
+import love.crysh.mixinta.model.PlanChange;
+import love.crysh.mixinta.model.PropagationEdge;
+
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;

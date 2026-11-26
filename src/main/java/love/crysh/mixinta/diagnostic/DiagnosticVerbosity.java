@@ -1,4 +1,4 @@
-package love.crysh.mixinta.analysis;
+package love.crysh.mixinta.diagnostic;
 
 public enum DiagnosticVerbosity {
     NORMAL,

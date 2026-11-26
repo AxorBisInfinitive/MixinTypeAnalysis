@@ -1,4 +1,4 @@
-package love.crysh.mixinta.analysis;
+package love.crysh.mixinta.bytecode;
 
 import org.junit.jupiter.api.Test;
 
