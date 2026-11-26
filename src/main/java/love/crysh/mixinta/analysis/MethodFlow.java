@@ -33,6 +33,10 @@ final class MethodFlow {
     ContainerAliases aliases;
 
     MethodFlow(String owner, MethodNode method) {
+        this(owner, method, new ContainerRules(java.util.List.of()));
+    }
+
+    MethodFlow(String owner, MethodNode method, ContainerRules containers) {
         key = new MethodKey(owner, method.name, method.desc);
         this.method = method;
         instructions = method.instructions.toArray();
@@ -40,7 +44,7 @@ final class MethodFlow {
             AbstractInsnNode instruction = instructions[index];
             indices.put(instruction, index);
             if (instruction instanceof TypeInsnNode allocation && allocation.getOpcode() == Opcodes.NEW
-                    && ContainerSummary.supportsAllocation(allocation.desc)) {
+                    && containers.supportsAllocation(allocation.desc)) {
                 allocations.put(instruction, new StorageId(key, index, Type.getObjectType(allocation.desc).getDescriptor()));
             }
         }

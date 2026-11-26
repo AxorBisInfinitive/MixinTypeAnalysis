@@ -68,6 +68,7 @@ final class RepresentationSolver {
     private final Map<MethodKey, Migration> targets;
     private final Map<String, ClassNode> classes;
     private final ClassHierarchy hierarchy;
+    private final ContainerRules containers;
     private final List<MethodFlow> flows = new ArrayList<>();
     private final Map<AbstractInsnNode, Site> sites = new IdentityHashMap<>();
     private final Set<AbstractInsnNode> migrated = new LinkedHashSet<>();
@@ -102,6 +103,7 @@ final class RepresentationSolver {
         this.hierarchy = hierarchy;
         this.diagnostics = diagnostics;
         this.representation = migration.representation();
+        this.containers = new ContainerRules(migration.containers());
     }
 
     Analysis analyze() {
@@ -110,7 +112,7 @@ final class RepresentationSolver {
             finishDiagnostics();
             return result();
         }
-        callGraph = new ContainerCallGraph(classes, flows, hierarchy);
+        callGraph = new ContainerCallGraph(classes, flows, hierarchy, containers);
         callGraph.solve();
         methodSummaries.putAll(callGraph.summaries());
         dependencies.addAll(callGraph.dependencies());
@@ -146,14 +148,14 @@ final class RepresentationSolver {
         for (ClassNode owner : classes.values()) {
             for (MethodNode method : owner.methods) {
                 MethodKey key = new MethodKey(owner.name, method.name, method.desc);
-                if (targets.containsKey(key)) {
+                if (targets.containsKey(key) || containers.models(key)) {
                     continue;
                 }
                 if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
                     methodSummaries.put(key, ContainerMethodAnalyzer.unavailable(key, method.access));
                     continue;
                 }
-                MethodFlow flow = new MethodFlow(owner.name, method);
+                MethodFlow flow = new MethodFlow(owner.name, method, containers);
                 flows.add(flow);
                 try {
                     flow.analyze();
@@ -171,7 +173,7 @@ final class RepresentationSolver {
                 if (flow.frames[index] != null && flow.instructions[index] instanceof MethodInsnNode call
                         && call.getOpcode() != Opcodes.INVOKESTATIC) {
                     StorageReferences receiver = flow.receiverReferences(index, call);
-                    containerUses.add(new ContainerUse(new Site(flow, index), call, ContainerSummary.resolve(call, receiver), receiver));
+                    containerUses.add(new ContainerUse(new Site(flow, index), call, containers.resolve(call, receiver), receiver));
                 }
             }
         }
@@ -195,7 +197,7 @@ final class RepresentationSolver {
             }
         }
         for (ContainerUse use : containerUses) {
-            if (use.summary() == null && ContainerSummary.resolve(use.call()) != null) {
+            if (use.summary() == null && containers.resolve(use.call()) != null) {
                 containerEffects.record(use.receivers().storages(), use.site().point(), ContainerEffects.Kind.UNKNOWN_OPERATION, -1);
             }
         }
@@ -617,19 +619,25 @@ final class RepresentationSolver {
                     break;
                 }
                 if (variable.signature != null && touchesStorage(flow.aliases.local(index, variable.index))) {
+                    StorageReferences references = flow.aliases.local(index, variable.index);
+                    Set<Integer> channels = references.references().stream()
+                            .filter(reference -> reference.kind() == ContainerReference.Kind.ROOT
+                                    && !ContainerSummary.supportsAllocation(Type.getType(reference.storage().descriptor()).getInternalName()))
+                            .flatMap(reference -> storages.stream().filter(slot -> slot.storage().equals(reference.storage())))
+                            .map(StorageSlot::channel).collect(java.util.stream.Collectors.toSet());
                     locals.add(new RepresentationPlan.Local(flow.key, local, variable.desc,
-                            storageSignature(variable.signature)));
+                            storageSignature(variable.signature, channels.isEmpty() ? null : channels)));
                     break;
                 }
             }
         }
     }
 
-    private String storageSignature(String signature) {
+    private String storageSignature(String signature, Set<Integer> channels) {
         int open = signature.indexOf('<');
         if (open < 0) return signature;
         String owner = signature.substring(1, open);
-        if (!ContainerSummary.mapOwner(owner) && !owner.equals("java/util/Map$Entry")) {
+        if (channels == null && !ContainerSummary.mapOwner(owner) && !owner.equals("java/util/Map$Entry")) {
             int entry = signature.indexOf("Ljava/util/Map$Entry<");
             if (entry >= 0) {
                 int depth = 0;
@@ -639,7 +647,7 @@ final class RepresentationSolver {
                     if (signature.charAt(end) == '>') depth--;
                     if (signature.charAt(end) == ';' && depth == 0) break;
                 }
-                return signature.substring(0, entry) + storageSignature(signature.substring(entry, end + 1))
+                return signature.substring(0, entry) + storageSignature(signature.substring(entry, end + 1), null)
                         + signature.substring(end + 1);
             }
             return signature.replace("Ljava/lang/Long;", representation.getDescriptor());
@@ -647,26 +655,25 @@ final class RepresentationSolver {
         int start = open + 1;
         int argument = 0;
         int depth = 0;
+        StringBuilder result = new StringBuilder(signature.substring(0, start));
         for (int index = start; index < signature.length(); index++) {
             char symbol = signature.charAt(index);
             if (symbol == '<') depth++;
             if (symbol == '>') depth--;
             if (depth == 0 && (symbol == ';' || symbol == '*')) {
-                if (argument == 1) {
-                    String value = signature.substring(start, index + 1);
+                String value = signature.substring(start, index + 1);
+                if (channels == null ? argument == 1 : channels.contains(argument)) {
                     if (value.equals("Ljava/lang/Long;") || value.equals("+Ljava/lang/Long;")
                             || value.equals("-Ljava/lang/Long;")) {
-                        return signature.substring(0, start)
-                                + value.replace("Ljava/lang/Long;", representation.getDescriptor())
-                                + signature.substring(index + 1);
+                        value = value.replace("Ljava/lang/Long;", representation.getDescriptor());
                     }
-                    return signature;
                 }
+                result.append(value);
                 argument++;
                 start = index + 1;
             }
         }
-        return signature;
+        return result.append(signature.substring(start)).toString();
     }
 
     private Migration target(MethodInsnNode call) {
@@ -682,7 +689,7 @@ final class RepresentationSolver {
 
     private ContainerSummary summary(Site site, MethodInsnNode call) {
         if (call.getOpcode() == Opcodes.INVOKESTATIC) return null;
-        return ContainerSummary.resolve(call, site.flow.receiverReferences(site.index, call));
+        return containers.resolve(call, site.flow.receiverReferences(site.index, call));
     }
 
     private boolean isContainerWrite(Site site, MethodInsnNode call, int parameter) {
@@ -738,6 +745,7 @@ final class RepresentationSolver {
 
     private boolean touchesStorage(StorageReferences references) {
         return references != null && references.references().stream().anyMatch(reference -> {
+            if (reference.kind() == ContainerReference.Kind.ROOT) return isSelectedStorage(reference.storage());
             int channel = ContainerSummary.mapOwner(Type.getType(reference.storage().descriptor()).getInternalName()) ? 1 : 0;
             return storages.contains(reference.slot(channel));
         });

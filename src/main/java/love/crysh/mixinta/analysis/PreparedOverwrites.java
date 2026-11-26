@@ -60,6 +60,46 @@ public final class PreparedOverwrites {
         Map<String, ClassNode> hierarchyNodes = new HashMap<>(nodes);
         hierarchyNodes.putAll(originalNodes);
         ClassHierarchy hierarchy = new ClassHierarchy(hierarchyNodes, resources);
+        ClassHierarchy outputHierarchy = new ClassHierarchy(nodes, resources);
+        Map<MethodKey, Migration> referenceTargets = new HashMap<>();
+        migrations.stream().filter(migration -> !migration.representations().isEmpty())
+                .forEach(migration -> referenceTargets.put(migration.original(), migration));
+        Map<MethodKey, ContainerRules.Definition> containerContracts = new HashMap<>();
+        for (Migration migration : migrations) {
+            for (RepresentationMigration representation : migration.representations()) {
+                for (ContainerRules.Definition definition : representation.containers()) {
+                    try {
+                        ContainerRules.validate(definition.method(), definition.summary(), outputHierarchy);
+                        ContainerRules.Definition previous = containerContracts.putIfAbsent(definition.method(), definition);
+                        if (previous != null && !previous.equals(definition)) {
+                            throw new IllegalArgumentException("Conflicting container contracts " + previous.id() + " and " + definition.id());
+                        }
+                        if (migrations.stream().anyMatch(other -> other.original().equals(definition.method())
+                                || other.implementation().equals(definition.method()))) {
+                            throw new IllegalArgumentException("Container rule overlaps a TypedOverwrite target " + definition.method());
+                        }
+                    } catch (RuntimeException failure) {
+                        diagnostics.add(new Diagnostic("CONTAINER_RULE_CONFLICT", representation.target(), -1,
+                                representation.parameter(), definition.id() + " version=" + definition.version() + " " + failure.getMessage()));
+                    }
+                }
+            }
+        }
+        for (ContainerRules.Definition definition : containerContracts.values()) {
+            ClassNode owner = nodes.get(definition.method().owner());
+            MethodNode method = owner == null ? null : ClassFiles.findMethod(owner, definition.method().name(), definition.method().descriptor());
+            if (method == null) continue;
+            for (AbstractInsnNode instruction : method.instructions) {
+                if (!(instruction instanceof MethodInsnNode call)) continue;
+                Migration migration = findMigration(call.owner, call.name, call.desc, referenceTargets,
+                        outputHierarchy, definition.method(), -1, diagnostics);
+                if (migration != null) {
+                    diagnostics.add(new Diagnostic("CONTAINER_RULE_CONFLICT", definition.method(), -1, -1,
+                            definition.id() + " contains a call requiring reference migration " + migration.original()));
+                }
+            }
+        }
+        ClassFiles.throwIfErrors(diagnostics);
         Map<MethodKey, Migration> byTarget = new HashMap<>();
         List<RepresentationPlan> representationPlans = new ArrayList<>();
         for (Migration migration : migrations) {

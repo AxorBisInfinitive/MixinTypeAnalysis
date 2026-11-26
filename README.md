@@ -69,7 +69,7 @@ public class ExampleMixin {
 
 迭代器和视图保存根容器身份、元素通道和引用种类。支持 `iterator`、`descendingIterator`、`listIterator`、`subList`、List 与 Deque 的 `reversed`，以及 Map 的 `values`、`keySet` 和 `entrySet`。`Iterator.next`、`ListIterator.previous` 和写入操作关联到根存储，`Map.Entry.getValue`、`setValue` 传播 value 表示，`getKey` 保留原 key 表示。增强 for 循环通过普通迭代器链处理，派生引用可通过方法参数、返回值和递归传播。
 
-视图上的 `contains` 和 `remove(Object)` 使用编码后的旧表示比较，remove 通过原迭代器删除第一个匹配元素。keySet 的查询和迭代保留 Long。原迭代器、视图和 Entry 继续执行状态检查、区间检查和 fail-fast 检查，拆箱位置继续使用 READ。Entry 和嵌套迭代器的泛型调试信息只改写 value。视图逃逸、来源不明、Entry 与普通元素迭代器合流、Map key 物理迁移、回调及未建模操作会形成诊断。当前支持范围包含上述标准操作，自定义容器摘要、stream、spliterator、bulk 操作和包装容器仍待实现。
+视图上的 `contains` 和 `remove(Object)` 使用编码后的旧表示比较，remove 通过原迭代器删除第一个匹配元素。keySet 的查询和迭代保留 Long。原迭代器、视图和 Entry 继续执行状态检查、区间检查和 fail-fast 检查，拆箱位置继续使用 READ。Entry 和嵌套迭代器的泛型调试信息只改写 value。视图逃逸、来源不明、Entry 与普通元素迭代器合流、Map key 物理迁移、回调及未建模操作会形成诊断。stream、spliterator 和 bulk 操作仍需扩展摘要。
 
 容器引用按指令位置、局部槽和操作数栈位置建立显式别名事实，保留全部可能的分配位置、未知来源和 null。局部赋值、引用 cast、分支、循环、异常路径和栈复制共享对应存储约束，局部槽复用按各自生命周期处理。固定批次中的普通调用通过方法摘要绑定 receiver、实参和返回来源，支持容器工厂、参数转发、递归和相互递归。字段、数组读取和缺少实现的工厂返回仍作为未知来源参与检查。
 
@@ -119,6 +119,30 @@ Map<String, byte[]> transformedClasses = plan.apply();
 诊断消息默认按未解决约束分组，包含目标迁移、调用位置、规则要求和一条依赖路径。分析失败的最后一行固定为 `Analysis failed. No transformations published.`。设置系统属性 `-Dmixinta.diagnostics=verbose`，或调用 `format(DiagnosticVerbosity.VERBOSE)`，可追加完整描述符、迁移身份、候选规则和全部传播边。
 
 栈帧所需的层次信息先从输入类读取，再通过资源 ClassLoader 读取外部 class 文件。计算过程中避免定义或初始化被分析的类，缺少层次信息时报告错误。
+
+## 自定义容器摘要
+
+在 `ParameterMigration.rules` 指定的类上重复声明 `@ContainerRule`。规则可以放在独立类或同目标的 Mixin 类上，`method` 使用 owner、方法名和完整 JVM 描述符。单条声明和重复声明均按 class 元数据读取。
+
+```java
+@ContainerRule(method = "example.Box.<init>()V", operation = ContainerRule.Operation.ALLOCATE)
+@ContainerRule(method = "example.Box.put(Ljava/lang/Object;)V",
+        operation = ContainerRule.Operation.WRITE, parameter = 0)
+@ContainerRule(method = "example.Box.take()Ljava/lang/Object;", operation = ContainerRule.Operation.READ_REMOVE)
+@ContainerRule(method = "example.Box.iterator()Ljava/util/Iterator;",
+        operation = ContainerRule.Operation.VIEW, view = ContainerRule.View.ITERATOR)
+public final class ExampleRules {
+    // 此处同时声明迁移所需的 SOURCE、READ 和 ENCODE 辅助方法。
+}
+```
+
+这个示例要求 `example.Box<T>` 是 final 类，`put(T)` 和 `take()` 的元素类型在字节码中擦除为 Object。`ALLOCATE` 声明构造器创建空存储，`WRITE` 将指定参数写入 receiver 的通道，`READ`、`READ_REMOVE` 和 `READ_WRITE` 从通道返回元素。`OBSERVE` 只返回结构标量，`CLEAR` 清空存储。`VIEW` 可声明 `ALIAS`、`ITERATOR`、`LIST_ITERATOR`、`LIST`、`SEQUENCE`、`KEYS`、`VALUES`、`ENTRIES` 或 `ENTRY` 关系，派生对象共享根存储。`ALIAS` 将自定义包装对象绑定到声明的单个元素通道。
+
+`channel` 默认是 0，多通道容器按操作分别声明，并以对应根类型参数的位置更新泛型调试信息。`parameter` 按方法参数计数，支持前面存在 long、double 参数。`id` 默认使用方法键，`version` 默认为 1。准备阶段检查方法存在性、固定派发、元素擦除类型、参数索引、view 返回类型及重复声明，Mixin 后重新验证结构并检查跨规则冲突。
+
+自定义规则描述完整的存储与行为契约。作者须保证实现可接受新引用表示，遵守声明的读写通道、异常和求值顺序，且不额外保留或暴露容器。摘要覆盖的方法体作为契约边界参与分析，未声明操作继续接受普通方法分析或生成未知访问诊断。批次内摘要方法直接调用需要引用迁移的目标时报告冲突，因为该方法体中的调用也需要改写。
+
+当前接受构造器，以及 private、final 方法或 final 类中的实例方法。元素读写描述符使用 Object，其他参数使用 primitive，结构返回值使用 primitive 或 void。static 操作、开放 virtual 派发、额外引用参数和数组元素描述符暂未实现。声明不能覆盖内置摘要。容器实现可从资源 ClassLoader 读取元数据，分析阶段保持其未定义、未初始化。
 
 ## Fabric 运行时接入
 

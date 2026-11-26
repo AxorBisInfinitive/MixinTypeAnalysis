@@ -18,6 +18,7 @@ import java.util.Set;
 /** 在方法内稳定来源帧上提取符号参数、返回关系及容器访问，未知调用保留在摘要中。 */
 final class ContainerMethodAnalyzer {
     private final MethodFlow flow;
+    private final ContainerRules containers;
     private final Map<Integer, MethodContainerSummary.Origin> parameters = new HashMap<>();
     private final List<MethodContainerSummary.Parameter> declarations;
     private final List<MethodContainerSummary.Returned> returns = new ArrayList<>();
@@ -25,7 +26,12 @@ final class ContainerMethodAnalyzer {
     private final List<MethodContainerSummary.Effect> effects = new ArrayList<>();
 
     ContainerMethodAnalyzer(MethodFlow flow) {
+        this(flow, new ContainerRules(List.of()));
+    }
+
+    ContainerMethodAnalyzer(MethodFlow flow, ContainerRules containers) {
         this.flow = flow;
+        this.containers = containers;
         declarations = parameters(flow.key);
         int local = 0;
         if ((flow.method.access & Opcodes.ACC_STATIC) == 0) {
@@ -96,7 +102,7 @@ final class ContainerMethodAnalyzer {
     }
 
     private void analyzeCall(int index, MethodInsnNode call, ProgramPoint point) {
-        ContainerSummary intrinsic = ContainerSummary.resolve(call);
+        ContainerSummary intrinsic = containers.resolve(call);
         MethodContainerSummary.Value receiver = null;
         if (call.getOpcode() != Opcodes.INVOKESTATIC) {
             receiver = value(flow.receiver(index, call), point);

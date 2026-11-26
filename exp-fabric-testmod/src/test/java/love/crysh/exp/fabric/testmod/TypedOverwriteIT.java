@@ -400,6 +400,91 @@ class TypedOverwriteIT {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"mixin", "external", "invalid", "escape"})
+    void usesCustomContainerContractsThroughRuntime(String scenario) throws Exception {
+        String declarations = """
+                @love.crysh.mixinta.ContainerRule(method="love.crysh.exp.Box.<init>()V", operation=love.crysh.mixinta.ContainerRule.Operation.ALLOCATE)
+                @love.crysh.mixinta.ContainerRule(method="love.crysh.exp.Box.put(Ljava/lang/Object;)V", operation=love.crysh.mixinta.ContainerRule.Operation.WRITE, parameter=%d)
+                @love.crysh.mixinta.ContainerRule(method="love.crysh.exp.Box.get(I)Ljava/lang/Object;", operation=love.crysh.mixinta.ContainerRule.Operation.READ)
+                @love.crysh.mixinta.ContainerRule(method="love.crysh.exp.Box.view()Ljava/util/List;", operation=love.crysh.mixinta.ContainerRule.Operation.VIEW, view=love.crysh.mixinta.ContainerRule.View.LIST)
+                """.formatted(scenario.equals("invalid") ? 1 : 0);
+        Map<String, String> app = new LinkedHashMap<>();
+        app.put("love.crysh.exp.BlockPos", "package love.crysh.exp; public record BlockPos(long value) { public long asLong(){return value;} }");
+        app.put("love.crysh.exp.Box", """
+                package love.crysh.exp;
+                public final class Box<T> {
+                    private final java.util.List<T> items = new java.util.ArrayList<>();
+                    public Box() {}
+                    public void put(T value) { items.add(value); }
+                    public T get(int index) { return items.get(index); }
+                    public java.util.List<T> view() { return items.subList(0, items.size()); }
+                }
+                """);
+        app.put(SUBJECT, "package love.crysh.exp; public final class Subject { public static Object saved; public static int lookup(long value){return (int)value;} }");
+        app.put("other.Worker", """
+                package other;
+                import love.crysh.exp.BlockPos;
+                import love.crysh.exp.Box;
+                import love.crysh.exp.Subject;
+                public final class Worker {
+                    public static Box<Long> create(int count) { return count == 0 ? new Box<>() : create(count - 1); }
+                    public static int run() {
+                        Box<Long> box = create(3);
+                        box.put(new BlockPos(12).asLong());
+                        java.util.List<Long> view = box.view();
+                        %s
+                        return Subject.lookup(view.iterator().next());
+                    }
+                }
+                """.formatted(scenario.equals("escape") ? "Subject.saved = view;" : ""));
+        app.put("love.crysh.exp.Main", """
+                package love.crysh.exp;
+                public final class Main {
+                    public static void main(String[] args) throws Exception {
+                        System.out.println("BUSINESS_EXECUTED");
+                        if (other.Worker.run() != 12) throw new AssertionError();
+                        Subject.class.getDeclaredMethod("lookup", BlockPos.class);
+                        var field = love.crysh.mixinta.runtime.TypedOverwriteRuntime.class.getDeclaredField("outputs");
+                        field.setAccessible(true);
+                        var outputs = (java.util.Map<String, byte[]>) field.get(null);
+                        var worker = new org.objectweb.asm.tree.ClassNode();
+                        new org.objectweb.asm.ClassReader(outputs.get("other/Worker")).accept(worker, 0);
+                        for (var method : worker.methods) {
+                            for (var instruction : method.instructions) {
+                                if (instruction instanceof org.objectweb.asm.tree.MethodInsnNode call
+                                        && (call.owner.equals("java/lang/Long") || call.name.equals("asLong"))) {
+                                    throw new AssertionError("Original element representation " + call.name);
+                                }
+                            }
+                        }
+                        System.out.println("CUSTOM_CONTAINER_BYTECODE_VERIFIED");
+                        System.out.println("RESULT=12");
+                    }
+                }
+                """);
+        String source = mixin("SubjectMixin", 1000, REFERENCE_MIXIN);
+        Map<String, String> helpers = Map.of();
+        if (scenario.equals("external")) {
+            source = source.replace("rules=SubjectMixin.class", "rules=fixture.Rules.class");
+            String rules = "package fixture; " + declarations + " public class Rules {"
+                    + REFERENCE_MIXIN.substring(REFERENCE_MIXIN.indexOf("@love.crysh.mixinta.TypeRule"))
+                    .replace("private static", "public static") + "}";
+            helpers = Map.of("fixture.Rules", rules);
+        } else {
+            source = source.replace("public class SubjectMixin", declarations + " public class SubjectMixin");
+        }
+        Result result = launch(app, Map.of("SubjectMixin", source), List.of(), helpers);
+        if (scenario.equals("invalid")) {
+            result.failure("INVALID_CONTAINER_RULE", "Invalid erased element parameter");
+        } else if (scenario.equals("escape")) {
+            result.failure("ESCAPED_CONTAINER", "Box", "channels=[0]");
+        } else {
+            result.success();
+            result.contains("RESULT=12", "CUSTOM_CONTAINER_BYTECODE_VERIFIED");
+        }
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"field", "array", "call", "capture"})
     void rejectsUncoveredContainerEffectsBeforeBusinessStarts(String scenario) throws Exception {
         String operation = switch (scenario) {

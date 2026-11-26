@@ -177,7 +177,7 @@ record ContainerSummary(ContainerOperation operation, int channel, int elementPa
     }
 
     private static ContainerSummary view(ContainerView view) {
-        return new ContainerSummary(ContainerOperation.VIEW, 0, -1, -1, -1, view);
+        return new ContainerSummary(ContainerOperation.VIEW, view == ContainerView.VALUES ? 1 : 0, -1, -1, -1, view);
     }
 
     static boolean mapOwner(String owner) {

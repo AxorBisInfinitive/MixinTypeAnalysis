@@ -136,7 +136,8 @@ final class RepresentationRules {
                     rules.add(new RepresentationMigration.Rule(ruleId, version, kind, source, key, binding, boundParameter, mergedOwner));
                 }
                 rules.sort(java.util.Comparator.comparing(RepresentationMigration.Rule::id));
-                result.add(new RepresentationMigration(id, target, parameter, after[parameter], owner, rules));
+                result.add(new RepresentationMigration(id, target, parameter, after[parameter], owner, rules,
+                        ContainerRules.read(ruleClass, hierarchy, target, parameter, diagnostics)));
             } catch (RuntimeException failure) {
                 diagnostics.add(new Diagnostic("INVALID_REPRESENTATION_RULE", target, -1, parameter, failure.getMessage()));
             }
@@ -172,7 +173,7 @@ final class RepresentationRules {
                     new MethodKey(owner.name, helper.name, helper.desc), rule.binding(), rule.parameter(), null));
         }
         return new RepresentationMigration(migration.id(), migration.target(), migration.parameter(), migration.representation(),
-                migration.rulesOwner(), rules);
+                migration.rulesOwner(), rules, migration.containers());
     }
 
     private static List<AnnotationNode> parameters(AnnotationNode annotation) {

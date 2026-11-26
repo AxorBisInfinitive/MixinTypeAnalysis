@@ -44,12 +44,12 @@ final class ContainerCallGraph {
     private final Map<MethodKey, Set<ProgramPoint>> incoming = new LinkedHashMap<>();
     private final Set<MethodKey> rooted = new LinkedHashSet<>();
 
-    ContainerCallGraph(Map<String, ClassNode> classes, List<MethodFlow> methods, ClassHierarchy hierarchy) {
+    ContainerCallGraph(Map<String, ClassNode> classes, List<MethodFlow> methods, ClassHierarchy hierarchy, ContainerRules containers) {
         this.classes = classes;
         this.hierarchy = hierarchy;
         for (MethodFlow flow : methods) {
             flows.put(flow.key, flow);
-            var analyzer = new ContainerMethodAnalyzer(flow);
+            var analyzer = new ContainerMethodAnalyzer(flow, containers);
             analyzers.put(flow.key, analyzer);
             summaries.put(flow.key, analyzer.analyze());
         }
@@ -165,7 +165,7 @@ final class ContainerCallGraph {
                 if (!empty(receiver)) {
                     ContainerView view = call.intrinsic().view();
                     if (view == null) view = ContainerView.ENTRY;
-                    returned = view.derive(receiver, call.point());
+                    returned = view.derive(receiver, call.point(), call.intrinsic().channel());
                 }
                 StorageReferences previous = results.get(call.point());
                 StorageReferences next = join(previous, returned);
