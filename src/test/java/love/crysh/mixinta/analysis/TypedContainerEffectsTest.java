@@ -208,4 +208,49 @@ class TypedContainerEffectsTest {
         BytecodeFixtures.verify(output);
         assertEquivalent(fixture.originals(), output);
     }
+
+    @Test
+    void attachesOrdinaryMethodSummaryToUnresolvedCallBoundary() {
+        var fixture = fixture("""
+                java.util.Queue<Long> queue = new java.util.ArrayDeque<>();
+                queue.add(position(12).asLong());
+                observe(queue);
+                return lookup(queue.poll());
+                """, "public static int observe(java.util.Queue<Long> queue) { return queue.size(); }");
+        var failure = assertThrows(TypedOverwriteException.class, fixture::transform);
+        assertEquals(1, failure.diagnostics().size());
+        var diagnostic = failure.diagnostics().getFirst();
+        assertEquals("UNKNOWN_CONTAINER_USE", diagnostic.code());
+        assertTrue(diagnostic.candidates().stream().anyMatch(candidate -> candidate.contains("Callee summary sample/Subject.observe")
+                && candidate.contains("body=true") && candidate.contains("operations=1")
+                && candidate.contains("effects=0") && candidate.contains("composition=unresolved")));
+        assertTrue(failure.format(DiagnosticVerbosity.VERBOSE).contains("Callee summary"));
+    }
+
+    @Test
+    void exposesUnavailableNativeBodyInDiagnosticSummary() {
+        var fixture = fixture("""
+                java.util.Queue<Long> queue = new java.util.ArrayDeque<>();
+                queue.add(position(12).asLong());
+                expose(queue);
+                return lookup(queue.poll());
+                """, "public static native void expose(Object queue);");
+        var failure = assertThrows(TypedOverwriteException.class, fixture::transform);
+        assertEquals("UNKNOWN_CONTAINER_USE", failure.diagnostics().getFirst().code());
+        assertTrue(failure.diagnostics().getFirst().candidates().stream().anyMatch(candidate ->
+                candidate.contains("Callee summary sample/Subject.expose") && candidate.contains("body=false")));
+    }
+
+    @Test
+    void exposesFactorySummaryWithoutAssumingReturnedStorageIdentity() {
+        var fixture = fixture("""
+                java.util.Queue<Long> queue = create();
+                queue.add(position(12).asLong());
+                return lookup(queue.poll());
+                """, "public static java.util.Queue<Long> create() { return new java.util.ArrayDeque<>(); }");
+        var failure = assertThrows(TypedOverwriteException.class, fixture::transform);
+        var unresolved = failure.diagnostics().stream().filter(diagnostic -> diagnostic.code().equals("UNRESOLVED_CONTAINER")).findFirst().orElseThrow();
+        assertTrue(unresolved.candidates().stream().anyMatch(candidate -> candidate.contains("Callee summary sample/Subject.create")
+                && candidate.contains("allocations=1") && candidate.contains("returns=1")));
+    }
 }

@@ -247,11 +247,13 @@ class TypedOverwriteIT {
                     }
                 }
                 """);
-        Result result = launch(app, Map.of("SubjectMixin", mixin("SubjectMixin", 1000, REFERENCE_MIXIN)), List.of());
+        List<String> options = scenario.equals("call") ? List.of("-Dmixinta.diagnostics=verbose") : List.of();
+        Result result = launch(app, Map.of("SubjectMixin", mixin("SubjectMixin", 1000, REFERENCE_MIXIN)), options);
         result.failure(scenario.equals("call") ? "UNKNOWN_CONTAINER_USE" : "ESCAPED_CONTAINER",
                 "channels=[0]", "allocation=java/util/ArrayDeque", "lookup", "poll");
         if (scenario.equals("call")) {
             result.contains("2 unresolved constraints", "argument=0", "argument=1", "escape=UNKNOWN");
+            result.contains("Callee summary love/crysh/exp/Subject.expose", "body=true", "effects=0", "composition=unresolved");
         } else {
             result.contains("escape=ESCAPED");
         }

@@ -40,12 +40,12 @@ final class ContainerEffects {
     private final List<Access> accesses = new ArrayList<>();
     private final Map<StorageId, EscapeState> escapes = new LinkedHashMap<>();
 
-    void record(StorageReferences references, ProgramPoint point, Kind kind, int parameter) {
-        if (references.storages().isEmpty()) {
+    void record(Set<StorageId> storages, ProgramPoint point, Kind kind, int parameter) {
+        if (storages.isEmpty()) {
             return;
         }
-        accesses.add(new Access(point, kind, parameter, references.storages()));
-        for (StorageId storage : references.storages()) {
+        accesses.add(new Access(point, kind, parameter, storages));
+        for (StorageId storage : storages) {
             escapes.merge(storage, kind.escape, (first, second) -> first.compareTo(second) >= 0 ? first : second);
         }
     }

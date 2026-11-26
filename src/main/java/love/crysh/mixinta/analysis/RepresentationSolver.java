@@ -7,28 +7,19 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
-import org.objectweb.asm.tree.FieldInsnNode;
-import org.objectweb.asm.tree.FrameNode;
-import org.objectweb.asm.tree.InsnList;
-import org.objectweb.asm.tree.InsnNode;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
-import org.objectweb.asm.tree.LabelNode;
 import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 import org.objectweb.asm.tree.VarInsnNode;
-import org.objectweb.asm.tree.analysis.Analyzer;
 import org.objectweb.asm.tree.analysis.AnalyzerException;
-import org.objectweb.asm.tree.analysis.BasicVerifier;
 import org.objectweb.asm.tree.analysis.Frame;
-import org.objectweb.asm.tree.analysis.SourceInterpreter;
 import org.objectweb.asm.tree.analysis.SourceValue;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
 import java.util.Arrays;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.LinkedHashMap;
@@ -43,7 +34,7 @@ final class RepresentationSolver {
             Set<RepresentationPlan.Location> storages) {
     }
 
-    private record Site(Flow flow, int index) {
+    private record Site(MethodFlow flow, int index) {
         MethodKey method() {
             return flow.key;
         }
@@ -53,23 +44,7 @@ final class RepresentationSolver {
         }
 
         String symbol() {
-            if (index < 0 || index >= flow.instructions.length) {
-                return method().toString();
-            }
-            AbstractInsnNode instruction = flow.instructions[index];
-            if (instruction instanceof MethodInsnNode call) {
-                return call.owner + "." + call.name + call.desc;
-            }
-            if (instruction instanceof TypeInsnNode type && type.getOpcode() == Opcodes.NEW) {
-                return type.desc;
-            }
-            if (instruction instanceof FieldInsnNode field) {
-                return field.owner + "." + field.name + ":" + field.desc;
-            }
-            if (instruction instanceof InvokeDynamicInsnNode dynamic) {
-                return "invokedynamic " + dynamic.name + dynamic.desc;
-            }
-            return method().toString();
+            return flow.point(index).symbol();
         }
 
         ProgramPoint point() {
@@ -88,64 +63,18 @@ final class RepresentationSolver {
             StorageReferences receivers) {
     }
 
-    private static final class Flow {
-        final MethodKey key;
-        final MethodNode method;
-        final AbstractInsnNode[] instructions;
-        Frame<SourceValue>[] frames;
-        ContainerAliases aliases;
-        final Map<AbstractInsnNode, Set<AbstractInsnNode>> consumed = new IdentityHashMap<>();
-
-        Flow(String owner, MethodNode method) {
-            this.key = new MethodKey(owner, method.name, method.desc);
-            this.method = method;
-            this.instructions = method.instructions.toArray();
-        }
-
-        SourceValue receiver(int index, MethodInsnNode call) {
-            int arguments = Type.getArgumentTypes(call.desc).length;
-            Frame<SourceValue> frame = frames[index];
-            return frame.getStack(frame.getStackSize() - arguments - 1);
-        }
-
-        SourceValue argument(int index, MethodInsnNode call, int parameter) {
-            int arguments = Type.getArgumentTypes(call.desc).length;
-            Frame<SourceValue> frame = frames[index];
-            return frame.getStack(frame.getStackSize() - arguments + parameter);
-        }
-
-        SourceValue top(int index) {
-            Frame<SourceValue> frame = frames[index];
-            return frame.getStack(frame.getStackSize() - 1);
-        }
-
-        StorageReferences receiverReferences(int index, MethodInsnNode call) {
-            int arguments = Type.getArgumentTypes(call.desc).length;
-            return aliases.stack(index, frames[index].getStackSize() - arguments - 1);
-        }
-
-        StorageReferences argumentReferences(int index, MethodInsnNode call, int parameter) {
-            int arguments = Type.getArgumentTypes(call.desc).length;
-            return aliases.stack(index, frames[index].getStackSize() - arguments + parameter);
-        }
-
-        StorageReferences topReferences(int index) {
-            return aliases.stack(index, frames[index].getStackSize() - 1);
-        }
-    }
-
     private final List<RepresentationMigration> migrations;
     private final RepresentationMigration migration;
     private final Map<MethodKey, Migration> targets;
     private final Map<String, ClassNode> classes;
     private final ClassHierarchy hierarchy;
-    private final List<Flow> flows = new ArrayList<>();
+    private final List<MethodFlow> flows = new ArrayList<>();
     private final Map<AbstractInsnNode, Site> sites = new IdentityHashMap<>();
     private final Set<AbstractInsnNode> migrated = new LinkedHashSet<>();
-    private final Map<AbstractInsnNode, StorageId> storageIds = new IdentityHashMap<>();
     private final Set<StorageSlot> storages = new LinkedHashSet<>();
     private final List<ContainerUse> containerUses = new ArrayList<>();
     private final ContainerEffects containerEffects = new ContainerEffects();
+    private final Map<MethodKey, MethodContainerSummary> methodSummaries = new LinkedHashMap<>();
     private final ArrayDeque<Demand> pending = new ArrayDeque<>();
     private final Set<AbstractInsnNode> requested = new HashSet<>();
     private final List<Diagnostic> diagnostics;
@@ -179,9 +108,6 @@ final class RepresentationSolver {
             finishDiagnostics();
             return result();
         }
-        for (Flow flow : flows) {
-            flow.aliases = new ContainerAliases(flow.frames, storageIds, origin -> sites.get(origin).point());
-        }
         indexContainerUses();
         indexContainerEffects();
         seedTargets();
@@ -196,7 +122,7 @@ final class RepresentationSolver {
         validateContainerEffects();
         finishDiagnostics();
         if (issues.isEmpty()) {
-            for (Flow flow : flows) {
+            for (MethodFlow flow : flows) {
                 plan(flow);
             }
         }
@@ -213,32 +139,28 @@ final class RepresentationSolver {
     private void analyzeMethods() {
         for (ClassNode owner : classes.values()) {
             for (MethodNode method : owner.methods) {
-                if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0
-                        || targets.containsKey(new MethodKey(owner.name, method.name, method.desc))) {
+                MethodKey key = new MethodKey(owner.name, method.name, method.desc);
+                if (targets.containsKey(key)) {
                     continue;
                 }
-                Flow flow = new Flow(owner.name, method);
-                flows.add(flow);
-                for (int index = 0; index < flow.instructions.length; index++) {
-                    AbstractInsnNode instruction = flow.instructions[index];
-                    sites.put(instruction, new Site(flow, index));
-                    if (instruction instanceof TypeInsnNode allocation && allocation.getOpcode() == Opcodes.NEW
-                            && ContainerSummary.supportsAllocation(allocation.desc)) {
-                        storageIds.put(instruction, new StorageId(flow.key, index,
-                                Type.getObjectType(allocation.desc).getDescriptor()));
-                    }
+                if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
+                    methodSummaries.put(key, ContainerMethodAnalyzer.unavailable(key, method.access));
+                    continue;
                 }
+                MethodFlow flow = new MethodFlow(owner.name, method);
+                flows.add(flow);
                 try {
-                    flow.frames = new Analyzer<>(new Origins(flow)).analyze(owner.name, method);
+                    flow.analyze();
                 } catch (AnalyzerException failure) {
                     problem("INVALID_PROPAGATION_INPUT", new Site(flow, -1), failure.getMessage());
                 }
+                flow.indices.forEach((instruction, index) -> sites.put(instruction, new Site(flow, index)));
             }
         }
     }
 
     private void indexContainerUses() {
-        for (Flow flow : flows) {
+        for (MethodFlow flow : flows) {
             for (int index = 0; index < flow.instructions.length; index++) {
                 if (flow.frames[index] != null && flow.instructions[index] instanceof MethodInsnNode call
                         && call.getOpcode() != Opcodes.INVOKESTATIC) {
@@ -250,42 +172,11 @@ final class RepresentationSolver {
     }
 
     private void indexContainerEffects() {
-        for (Flow flow : flows) {
-            for (int index = 0; index < flow.instructions.length; index++) {
-                if (flow.frames[index] == null) {
-                    continue;
-                }
-                AbstractInsnNode instruction = flow.instructions[index];
-                ProgramPoint point = new Site(flow, index).point();
-                if (instruction instanceof MethodInsnNode call) {
-                    if (call.getOpcode() != Opcodes.INVOKESTATIC && ContainerSummary.resolve(call) == null) {
-                        containerEffects.record(flow.receiverReferences(index, call), point,
-                                ContainerEffects.Kind.UNKNOWN_OPERATION, -1);
-                    }
-                    for (int parameter = 0; parameter < Type.getArgumentTypes(call.desc).length; parameter++) {
-                        containerEffects.record(flow.argumentReferences(index, call, parameter), point,
-                                ContainerEffects.Kind.CALL_ARGUMENT, parameter);
-                    }
-                } else if (instruction instanceof InvokeDynamicInsnNode dynamic) {
-                    int arguments = Type.getArgumentTypes(dynamic.desc).length;
-                    for (int parameter = 0; parameter < arguments; parameter++) {
-                        var references = flow.aliases.stack(index, flow.frames[index].getStackSize() - arguments + parameter);
-                        containerEffects.record(references, point, ContainerEffects.Kind.DYNAMIC_CAPTURE, parameter);
-                    }
-                } else {
-                    ContainerEffects.Kind kind = switch (instruction.getOpcode()) {
-                        case Opcodes.ARETURN -> ContainerEffects.Kind.RETURN;
-                        case Opcodes.PUTFIELD, Opcodes.PUTSTATIC -> ContainerEffects.Kind.FIELD_STORE;
-                        case Opcodes.AASTORE -> ContainerEffects.Kind.ARRAY_STORE;
-                        default -> null;
-                    };
-                    if (kind != null) {
-                        containerEffects.record(flow.topReferences(index), point, kind, -1);
-                    } else if (!(instruction instanceof VarInsnNode) && !isContainerReferenceOperation(instruction)) {
-                        var references = flow.aliases.origins(flow.consumed.getOrDefault(instruction, Set.of()));
-                        containerEffects.record(references, point, ContainerEffects.Kind.UNSUPPORTED_USE, -1);
-                    }
-                }
+        for (MethodFlow flow : flows) {
+            MethodContainerSummary summary = new ContainerMethodAnalyzer(flow).analyze();
+            methodSummaries.put(flow.key, summary);
+            for (MethodContainerSummary.Effect effect : summary.effects()) {
+                containerEffects.record(effect.subject().storages(), effect.point(), effect.kind(), effect.parameter());
             }
         }
     }
@@ -311,68 +202,27 @@ final class RepresentationSolver {
                     : access.kind() == ContainerEffects.Kind.UNKNOWN_OPERATION ? "receiver" : "value";
             candidateProblem(access.kind().code(), site(access.point()), access.parameter(),
                     access.kind() + " " + binding + " requires modeled container effects, storage=" + String.join(", ", details),
-                    List.of());
+                    summaryCandidates(site(access.point())));
         }
     }
 
-    private final class Origins extends SourceInterpreter {
-        private final Flow flow;
-        private final Map<Integer, LabelNode> parameters = new HashMap<>();
-
-        Origins(Flow flow) {
-            super(Opcodes.ASM9);
-            this.flow = flow;
+    private List<String> summaryCandidates(Site site) {
+        if (site.index < 0 || !(site.flow.instructions[site.index] instanceof MethodInsnNode call)) {
+            return List.of();
         }
-
-        @Override
-        public SourceValue newParameterValue(boolean instance, int local, Type type) {
-            LabelNode parameter = parameters.computeIfAbsent(local, slot -> {
-                LabelNode label = new LabelNode();
-                sites.put(label, new Site(flow, -1 - slot));
-                return label;
-            });
-            return new SourceValue(type.getSize(), parameter);
+        MethodContainerSummary summary = methodSummaries.get(symbol(call));
+        if (summary == null) {
+            return List.of();
         }
-
-        private void consume(AbstractInsnNode instruction, SourceValue... values) {
-            Set<AbstractInsnNode> origins = flow.consumed.computeIfAbsent(instruction, ignored -> new HashSet<>());
-            for (SourceValue value : values) {
-                origins.addAll(value.insns);
-            }
-        }
-
-        @Override
-        public SourceValue copyOperation(AbstractInsnNode instruction, SourceValue value) {
-            consume(instruction, value);
-            return value;
-        }
-
-        @Override
-        public SourceValue binaryOperation(AbstractInsnNode instruction, SourceValue first, SourceValue second) {
-            consume(instruction, first, second);
-            return super.binaryOperation(instruction, first, second);
-        }
-
-        @Override
-        public SourceValue ternaryOperation(AbstractInsnNode instruction, SourceValue first, SourceValue second, SourceValue third) {
-            consume(instruction, first, second, third);
-            return super.ternaryOperation(instruction, first, second, third);
-        }
-
-        @Override
-        public void returnOperation(AbstractInsnNode instruction, SourceValue value, SourceValue expected) {
-            consume(instruction, value);
-        }
-
-        @Override
-        public SourceValue unaryOperation(AbstractInsnNode instruction, SourceValue value) {
-            consume(instruction, value);
-            return instruction.getOpcode() == Opcodes.CHECKCAST ? value : super.unaryOperation(instruction, value);
-        }
+        long operations = summary.calls().stream().filter(value -> value.intrinsic() != null).count();
+        return List.of("Callee summary " + summary.method() + " body=" + summary.hasBody()
+                + " allocations=" + summary.allocations().size() + " returns=" + summary.returns().size()
+                + " operations=" + operations + " calls=" + summary.calls().size() + " effects=" + summary.effects().size()
+                + " composition=unresolved");
     }
 
     private void seedTargets() {
-        for (Flow flow : flows) {
+        for (MethodFlow flow : flows) {
             for (int index = 0; index < flow.instructions.length; index++) {
                 if (flow.frames[index] == null || !(flow.instructions[index] instanceof MethodInsnNode call)) {
                     continue;
@@ -448,7 +298,8 @@ final class RepresentationSolver {
         for (ProgramPoint origin : references.unknownOrigins()) {
             Site site = site(origin);
             dependencies.add(new PropagationEdge(path, origin, DependencyKind.CONTAINER_ALLOCATION));
-            problem("UNRESOLVED_CONTAINER", site, path.key() + " <- unknown storage at " + origin.symbol());
+            candidateProblem("UNRESOLVED_CONTAINER", site,
+                    path.key() + " <- unknown storage at " + origin.symbol(), summaryCandidates(site));
         }
     }
 
@@ -482,7 +333,7 @@ final class RepresentationSolver {
             }
         }
         // 所有读取方都要跟随共享元素迁移，包含最终传入旧消费者的读取。
-        for (Flow flow : flows) {
+        for (MethodFlow flow : flows) {
             for (int index = 0; index < flow.instructions.length; index++) {
                 if (flow.frames[index] != null && flow.instructions[index] instanceof MethodInsnNode call
                         && isUnbox(call) && touches(flow.receiver(index, call), migrated)) {
@@ -493,7 +344,7 @@ final class RepresentationSolver {
     }
 
     private void unifyLocalMerges() {
-        for (Flow flow : flows) {
+        for (MethodFlow flow : flows) {
             for (int index = 0; index < flow.instructions.length; index++) {
                 if (flow.frames[index] == null || !(flow.instructions[index] instanceof VarInsnNode variable)) {
                     continue;
@@ -515,7 +366,7 @@ final class RepresentationSolver {
     }
 
     private void validateUses() {
-        for (Flow flow : flows) {
+        for (MethodFlow flow : flows) {
             for (int index = 0; index < flow.instructions.length; index++) {
                 if (flow.frames[index] == null) {
                     continue;
@@ -569,7 +420,7 @@ final class RepresentationSolver {
     }
 
     private void validateCall(Site site, MethodInsnNode call) {
-        Flow flow = site.flow;
+        MethodFlow flow = site.flow;
         int index = site.index;
         boolean receiverPresent = call.getOpcode() != Opcodes.INVOKESTATIC;
         if (isUnbox(call) && migrated.contains(call)) {
@@ -620,7 +471,7 @@ final class RepresentationSolver {
         helper(TypeRule.Kind.ENCODE, site);
     }
 
-    private void plan(Flow flow) {
+    private void plan(MethodFlow flow) {
         for (int index = 0; index < flow.instructions.length; index++) {
             if (flow.frames[index] == null) {
                 continue;
@@ -685,7 +536,7 @@ final class RepresentationSolver {
         changes.add(new PlanChange(site.method(), site.index, action, migration.id(), rule == null ? "" : rule.id()));
     }
 
-    private void planLocalMetadata(Flow flow) {
+    private void planLocalMetadata(MethodFlow flow) {
         if (flow.method.localVariables == null) {
             return;
         }
@@ -768,7 +619,7 @@ final class RepresentationSolver {
         return summary != null && (summary.keyParameter() == parameter || summary.observedParameter() == parameter);
     }
 
-    private boolean isMigratedMapObservation(Flow flow, int index, MethodInsnNode call) {
+    private boolean isMigratedMapObservation(MethodFlow flow, int index, MethodInsnNode call) {
         ContainerSummary summary = ContainerSummary.resolve(call);
         return summary != null && summary.observedParameter() >= 0 && touchesStorage(flow.receiverReferences(index, call));
     }
@@ -807,16 +658,6 @@ final class RepresentationSolver {
         return value != null && value.insns.stream().anyMatch(selected::contains);
     }
 
-    private static boolean isContainerReferenceOperation(AbstractInsnNode instruction) {
-        return switch (instruction.getOpcode()) {
-            case Opcodes.DUP, Opcodes.DUP_X1, Opcodes.DUP_X2, Opcodes.DUP2, Opcodes.DUP2_X1,
-                    Opcodes.DUP2_X2, Opcodes.SWAP, Opcodes.CHECKCAST, Opcodes.INSTANCEOF,
-                    Opcodes.IFNULL, Opcodes.IFNONNULL, Opcodes.IF_ACMPEQ, Opcodes.IF_ACMPNE,
-                    Opcodes.MONITORENTER, Opcodes.MONITOREXIT -> true;
-            default -> false;
-        };
-    }
-
     private boolean touchesStorage(StorageReferences references) {
         return references != null && references.storages().stream().anyMatch(this::isSelectedStorage);
     }
@@ -826,7 +667,7 @@ final class RepresentationSolver {
     }
 
     private Site site(ProgramPoint point) {
-        Flow flow = flows.stream().filter(candidate -> candidate.key.equals(point.method())).findFirst().orElseThrow();
+        MethodFlow flow = flows.stream().filter(candidate -> candidate.key.equals(point.method())).findFirst().orElseThrow();
         return new Site(flow, point.instruction());
     }
 
