@@ -24,11 +24,7 @@ class TypedContainerEffectsTest {
                         "ESCAPED_CONTAINER", "ARRAY_STORE", "ESCAPED", -1),
                 new Exposure("Runnable task = () -> queue.clear();", "",
                         "ESCAPED_CONTAINER", "DYNAMIC_CAPTURE", "ESCAPED", 0),
-                new Exposure("observe(queue);", "public static int observe(java.util.Queue<Long> queue) { return queue.size(); }",
-                        "UNKNOWN_CONTAINER_USE", "CALL_ARGUMENT", "UNKNOWN", 0),
-                new Exposure("mutate(queue);", "public static void mutate(java.util.Queue<Long> queue) { queue.add(7L); }",
-                        "UNKNOWN_CONTAINER_USE", "CALL_ARGUMENT", "UNKNOWN", 0),
-                new Exposure("retain(queue);", "public static Object saved; public static void retain(Object queue) { saved = queue; }",
+                new Exposure("opaque(queue);", "public static native void opaque(Object queue);",
                         "UNKNOWN_CONTAINER_USE", "CALL_ARGUMENT", "UNKNOWN", 0),
                 new Exposure("new java.util.ArrayList<>(queue);", "",
                         "UNKNOWN_CONTAINER_USE", "CALL_ARGUMENT", "UNKNOWN", 0),
@@ -101,7 +97,7 @@ class TypedContainerEffectsTest {
             default -> "queue.add(position(12).asLong()); try { if (flag) throw new IllegalStateException(); } catch (IllegalStateException expected) { expose(queue); } return lookup(queue.poll());";
         };
         var fixture = fixture("java.util.Queue<Long> queue = new java.util.ArrayDeque<>();" + operation,
-                "public static void expose(Object queue) {}");
+                "public static native void expose(Object queue);");
         var failure = assertThrows(TypedOverwriteException.class, fixture::transform);
         assertEquals(1, failure.diagnostics().size());
         assertEquals("UNKNOWN_CONTAINER_USE", failure.diagnostics().getFirst().code());
@@ -116,7 +112,7 @@ class TypedContainerEffectsTest {
                 expose(queue, queue);
                 saved = queue;
                 return lookup(queue.poll());
-                """, "public static Object saved; public static void expose(Object first, Object second) {}");
+                """, "public static Object saved; public static native void expose(Object first, Object second);");
         var failure = assertThrows(TypedOverwriteException.class, fixture::transform);
         assertEquals(3, failure.diagnostics().size());
         var arguments = failure.diagnostics().stream().filter(diagnostic -> diagnostic.code().equals("UNKNOWN_CONTAINER_USE")).toList();
@@ -136,7 +132,7 @@ class TypedContainerEffectsTest {
                 Object alias = flag ? first : second;
                 expose(alias);
                 return lookup(first.poll()) + lookup(second.poll());
-                """, "public static void expose(Object queue) {}");
+                """, "public static native void expose(Object queue);");
         var failure = assertThrows(TypedOverwriteException.class, fixture::transform);
         assertEquals(1, failure.diagnostics().size());
         var diagnostic = failure.diagnostics().getFirst();
@@ -153,7 +149,7 @@ class TypedContainerEffectsTest {
                 map.put(7L, position(12).asLong());
                 expose(map);
                 return lookup(map.get(7L));
-                """, "public static void expose(Object map) {}");
+                """, "public static native void expose(Object map);");
         var failure = assertThrows(TypedOverwriteException.class, fixture::transform);
         assertEquals(1, failure.diagnostics().size());
         assertTrue(failure.diagnostics().getFirst().message().contains("channels=[1]"));
@@ -210,21 +206,16 @@ class TypedContainerEffectsTest {
     }
 
     @Test
-    void attachesOrdinaryMethodSummaryToUnresolvedCallBoundary() {
+    void appliesOrdinaryObserverSummary() throws Exception {
         var fixture = fixture("""
                 java.util.Queue<Long> queue = new java.util.ArrayDeque<>();
                 queue.add(position(12).asLong());
                 observe(queue);
                 return lookup(queue.poll());
                 """, "public static int observe(java.util.Queue<Long> queue) { return queue.size(); }");
-        var failure = assertThrows(TypedOverwriteException.class, fixture::transform);
-        assertEquals(1, failure.diagnostics().size());
-        var diagnostic = failure.diagnostics().getFirst();
-        assertEquals("UNKNOWN_CONTAINER_USE", diagnostic.code());
-        assertTrue(diagnostic.candidates().stream().anyMatch(candidate -> candidate.contains("Callee summary sample/Subject.observe")
-                && candidate.contains("body=true") && candidate.contains("operations=1")
-                && candidate.contains("effects=0") && candidate.contains("composition=unresolved")));
-        assertTrue(failure.format(DiagnosticVerbosity.VERBOSE).contains("Callee summary"));
+        var output = fixture.transform();
+        BytecodeFixtures.verify(output);
+        assertEquivalent(fixture.originals(), output);
     }
 
     @Test
@@ -242,15 +233,14 @@ class TypedContainerEffectsTest {
     }
 
     @Test
-    void exposesFactorySummaryWithoutAssumingReturnedStorageIdentity() {
+    void appliesFactoryReturnSummary() throws Exception {
         var fixture = fixture("""
                 java.util.Queue<Long> queue = create();
                 queue.add(position(12).asLong());
                 return lookup(queue.poll());
                 """, "public static java.util.Queue<Long> create() { return new java.util.ArrayDeque<>(); }");
-        var failure = assertThrows(TypedOverwriteException.class, fixture::transform);
-        var unresolved = failure.diagnostics().stream().filter(diagnostic -> diagnostic.code().equals("UNRESOLVED_CONTAINER")).findFirst().orElseThrow();
-        assertTrue(unresolved.candidates().stream().anyMatch(candidate -> candidate.contains("Callee summary sample/Subject.create")
-                && candidate.contains("allocations=1") && candidate.contains("returns=1")));
+        var output = fixture.transform();
+        BytecodeFixtures.verify(output);
+        assertEquivalent(fixture.originals(), output);
     }
 }

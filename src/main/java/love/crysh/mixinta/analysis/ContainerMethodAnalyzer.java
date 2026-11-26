@@ -121,7 +121,7 @@ final class ContainerMethodAnalyzer {
         effects.add(new MethodContainerSummary.Effect(point, kind, parameter, value));
     }
 
-    private MethodContainerSummary.Value value(SourceValue source, ProgramPoint use) {
+    MethodContainerSummary.Value value(SourceValue source, ProgramPoint use) {
         Set<MethodContainerSummary.Origin> origins = new LinkedHashSet<>();
         boolean nullable = false;
         for (AbstractInsnNode origin : source.insns) {

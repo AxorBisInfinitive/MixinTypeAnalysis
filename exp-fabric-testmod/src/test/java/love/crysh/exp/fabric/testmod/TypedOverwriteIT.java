@@ -214,6 +214,93 @@ class TypedOverwriteIT {
     }
 
     @ParameterizedTest
+    @ValueSource(strings = {"factory", "dispatch"})
+    void composesContainerSummariesAcrossClassesThroughRuntime(String scenario) throws Exception {
+        Map<String, String> app = new LinkedHashMap<>();
+        app.put("love.crysh.exp.BlockPos", "package love.crysh.exp; public record BlockPos(long value) { public long asLong(){return value;} }");
+        app.put(SUBJECT, """
+                package love.crysh.exp;
+                public final class Subject {
+                    public static int lookup(long value) { return (int)value; }
+                    public static int run(boolean first) { return other.Worker.run(first); }
+                }
+                """);
+        app.put("other.Worker", """
+                package other;
+                import java.util.Queue;
+                import love.crysh.exp.BlockPos;
+                import love.crysh.exp.Subject;
+                public final class Worker {
+                    public static Queue<Long> create(int depth) {
+                        return depth == 0 ? new java.util.ArrayDeque<>() : create(depth - 1);
+                    }
+                    public static Queue<Long> identity(Queue<Long> queue, int depth) {
+                        return depth == 0 ? queue : identity(queue, depth - 1);
+                    }
+                    public static void write(Queue<Long> queue, BlockPos value) { queue.add(value.asLong()); }
+                    public static long legacy(Queue<Long> queue) { return queue.peek(); }
+                    public static int read(Queue<Long> queue) { return Subject.lookup(queue.poll()); }
+                    public static int run(boolean first) {
+                        Queue<Long> queue = create(3);
+                        write(queue, new BlockPos(12));
+                        if (legacy(queue) != 12) throw new AssertionError("Legacy read changed");
+                        %s
+                    }
+                }
+                """.formatted(scenario.equals("factory")
+                ? "return read(identity(queue, 4));"
+                : "Reader reader = first ? new First() : new Second(); return reader.read(identity(queue, 4));"));
+        if (scenario.equals("dispatch")) {
+            app.put("other.Reader", "package other; public interface Reader { int read(java.util.Queue<Long> queue); }");
+            app.put("other.First", "package other; public class First implements Reader { public int read(java.util.Queue<Long> queue) { return Worker.read(queue); } }");
+            app.put("other.Second", "package other; public class Second implements Reader { public int read(java.util.Queue<Long> queue) { return Worker.read(queue); } }");
+        }
+        app.put("love.crysh.exp.Main", """
+                package love.crysh.exp;
+                public final class Main {
+                    public static void main(String[] args) throws Exception {
+                        System.out.println("BUSINESS_EXECUTED");
+                        if (Subject.run(true) != 12 || Subject.run(false) != 12) throw new AssertionError();
+                        Subject.class.getDeclaredMethod("lookup", BlockPos.class);
+                        other.Worker.class.getDeclaredMethod("create", int.class);
+                        if (other.Worker.class.getDeclaredMethod("legacy", java.util.Queue.class).getReturnType() != long.class) {
+                            throw new AssertionError("Legacy descriptor changed");
+                        }
+                        var field = love.crysh.mixinta.runtime.TypedOverwriteRuntime.class.getDeclaredField("outputs");
+                        field.setAccessible(true);
+                        var outputs = (java.util.Map<String, byte[]>) field.get(null);
+                        var worker = new org.objectweb.asm.tree.ClassNode();
+                        new org.objectweb.asm.ClassReader(outputs.get("other/Worker")).accept(worker, 0);
+                        var bridges = new java.util.HashSet<String>();
+                        for (var method : worker.methods) {
+                            for (var instruction : method.instructions) {
+                                if (instruction instanceof org.objectweb.asm.tree.MethodInsnNode call
+                                        && call.owner.equals("love/crysh/exp/Subject") && call.name.startsWith("mixinta$rule$")) {
+                                    bridges.add(call.name);
+                                }
+                                if (instruction instanceof org.objectweb.asm.tree.MethodInsnNode call
+                                        && call.owner.equals("java/lang/Long")) throw new AssertionError(call.name);
+                            }
+                        }
+                        if (bridges.size() != 3) throw new AssertionError("Missing rule bridges " + bridges);
+                        var subject = new org.objectweb.asm.tree.ClassNode();
+                        new org.objectweb.asm.ClassReader(outputs.get("love/crysh/exp/Subject")).accept(subject, 0);
+                        for (var method : subject.methods) {
+                            if (bridges.contains(method.name) && (method.access & 0x1009) != 0x1009) {
+                                throw new AssertionError("Inaccessible bridge " + method.name);
+                            }
+                        }
+                        System.out.println("CALL_GRAPH_BYTECODE_VERIFIED");
+                        System.out.println("RESULT=12");
+                    }
+                }
+                """);
+        Result result = launch(app, Map.of("SubjectMixin", mixin("SubjectMixin", 1000, REFERENCE_MIXIN)), List.of());
+        result.success();
+        result.contains("RESULT=12", "CALL_GRAPH_BYTECODE_VERIFIED");
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"field", "array", "call", "capture"})
     void rejectsUncoveredContainerEffectsBeforeBusinessStarts(String scenario) throws Exception {
         String operation = switch (scenario) {
@@ -228,7 +315,7 @@ class TypedOverwriteIT {
                 package love.crysh.exp;
                 public final class Subject {
                     public static Object saved;
-                    public static void expose(Object first, Object second) {}
+                    public static native void expose(Object first, Object second);
                     public static int lookup(long value) { return (int)value; }
                     public static int run() {
                         java.util.Queue<Long> queue = new java.util.ArrayDeque<>();
@@ -253,7 +340,7 @@ class TypedOverwriteIT {
                 "channels=[0]", "allocation=java/util/ArrayDeque", "lookup", "poll");
         if (scenario.equals("call")) {
             result.contains("2 unresolved constraints", "argument=0", "argument=1", "escape=UNKNOWN");
-            result.contains("Callee summary love/crysh/exp/Subject.expose", "body=true", "effects=0", "composition=unresolved");
+            result.contains("Callee summary love/crysh/exp/Subject.expose", "body=false", "effects=0", "composition=unresolved");
         } else {
             result.contains("escape=ESCAPED");
         }

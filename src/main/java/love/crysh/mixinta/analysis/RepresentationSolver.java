@@ -75,6 +75,7 @@ final class RepresentationSolver {
     private final List<ContainerUse> containerUses = new ArrayList<>();
     private final ContainerEffects containerEffects = new ContainerEffects();
     private final Map<MethodKey, MethodContainerSummary> methodSummaries = new LinkedHashMap<>();
+    private ContainerCallGraph callGraph;
     private final ArrayDeque<Demand> pending = new ArrayDeque<>();
     private final Set<AbstractInsnNode> requested = new HashSet<>();
     private final List<Diagnostic> diagnostics;
@@ -86,6 +87,7 @@ final class RepresentationSolver {
     private final List<RepresentationPlan.Argument> arguments = new ArrayList<>();
     private final List<RepresentationPlan.Local> locals = new ArrayList<>();
     private final List<PlanChange> changes = new ArrayList<>();
+    private final Map<MethodKey, RepresentationPlan.Bridge> bridges = new LinkedHashMap<>();
     private final Type representation;
 
     private record Issue(String code, Site site, int parameter, String message, List<String> candidates) {
@@ -108,6 +110,10 @@ final class RepresentationSolver {
             finishDiagnostics();
             return result();
         }
+        callGraph = new ContainerCallGraph(classes, flows, hierarchy);
+        callGraph.solve();
+        methodSummaries.putAll(callGraph.summaries());
+        dependencies.addAll(callGraph.dependencies());
         indexContainerUses();
         indexContainerEffects();
         seedTargets();
@@ -130,7 +136,7 @@ final class RepresentationSolver {
     }
 
     private Analysis result() {
-        return new Analysis(new RepresentationPlan(edits, arguments, locals, changes, orderedEdges(dependencies)),
+        return new Analysis(new RepresentationPlan(edits, arguments, locals, List.copyOf(bridges.values()), changes, orderedEdges(dependencies)),
                 migrated.stream().map(origin -> location(sites.get(origin))).collect(java.util.stream.Collectors.toSet()),
                 storages.stream().map(slot -> new RepresentationPlan.Location(slot.storage().method(), slot.storage().instruction()))
                         .collect(java.util.stream.Collectors.toSet()));
@@ -172,11 +178,16 @@ final class RepresentationSolver {
     }
 
     private void indexContainerEffects() {
-        for (MethodFlow flow : flows) {
-            MethodContainerSummary summary = new ContainerMethodAnalyzer(flow).analyze();
-            methodSummaries.put(flow.key, summary);
+        for (MethodContainerSummary summary : methodSummaries.values()) {
             for (MethodContainerSummary.Effect effect : summary.effects()) {
-                containerEffects.record(effect.subject().storages(), effect.point(), effect.kind(), effect.parameter());
+                boolean ordinaryCall = effect.kind() == ContainerEffects.Kind.CALL_ARGUMENT
+                        || effect.kind() == ContainerEffects.Kind.UNKNOWN_OPERATION;
+                if (ordinaryCall && callGraph.covered(effect.point())
+                        || effect.kind() == ContainerEffects.Kind.RETURN && callGraph.internalReturn(summary.method())) {
+                    continue;
+                }
+                containerEffects.record(callGraph.resolve(summary.method(), effect.subject()).storages(),
+                        effect.point(), effect.kind(), effect.parameter());
             }
         }
     }
@@ -218,7 +229,8 @@ final class RepresentationSolver {
         return List.of("Callee summary " + summary.method() + " body=" + summary.hasBody()
                 + " allocations=" + summary.allocations().size() + " returns=" + summary.returns().size()
                 + " operations=" + operations + " calls=" + summary.calls().size() + " effects=" + summary.effects().size()
-                + " composition=unresolved");
+                + " composition=" + (callGraph.covered(site.point()) ? "resolved" : "unresolved")
+                + " coverage=" + callGraph.coverage(site.point()));
     }
 
     private void seedTargets() {
@@ -263,6 +275,7 @@ final class RepresentationSolver {
                     migrated.add(origin);
                     if (candidates.size() == 1) {
                         selected.put(origin, candidates.getFirst());
+                        checkHelperAccess(candidates.getFirst().helper(), site);
                     } else {
                         candidateProblem("AMBIGUOUS_SOURCE_RULE", site, "Multiple applicable source rules " + symbol(call),
                                 candidates.stream().map(rule -> rule.id() + " applicable").toList());
@@ -464,7 +477,23 @@ final class RepresentationSolver {
                     "Expected one " + kind + " helper", candidates.stream().map(rule -> rule.id() + " applicable").toList());
             return null;
         }
+        checkHelperAccess(candidates.getFirst().helper(), site);
         return candidates.getFirst();
+    }
+
+    private void checkHelperAccess(MethodKey helper, Site site) {
+        ClassNode owner = classes.get(helper.owner());
+        if ((owner.access & Opcodes.ACC_PUBLIC) == 0 && !packageName(owner.name).equals(packageName(site.method().owner()))) {
+            problem("RULE_HELPER_NOT_ACCESSIBLE", site, "Rule helper owner is inaccessible from " + site.method() + ": " + helper);
+        }
+        ClassNode type = hierarchy.get(representation.getInternalName());
+        if ((type.access & Opcodes.ACC_PUBLIC) == 0 && !packageName(type.name).equals(packageName(site.method().owner()))) {
+            problem("REPRESENTATION_TYPE_NOT_ACCESSIBLE", site, "Representation type is inaccessible from " + site.method() + ": " + type.name);
+        }
+    }
+
+    private static String packageName(String owner) {
+        return owner.substring(0, Math.max(0, owner.lastIndexOf('/')));
     }
 
     private void requireEncoder(Site site) {
@@ -496,7 +525,7 @@ final class RepresentationSolver {
                     edit(site, "replace-unboxing", helper(TypeRule.Kind.READ, site));
                 } else if (isMigratedMapObservation(flow, index, call)) {
                     var encoder = helper(TypeRule.Kind.ENCODE, site);
-                    edits.add(new RepresentationPlan.Edit(location(site), "observe-map-values", encoder.helper(),
+                    edits.add(new RepresentationPlan.Edit(location(site), "observe-map-values", accessibleHelper(encoder.helper(), site),
                             representation, TypeRule.Binding.RECEIVER,
                             touches(flow.argument(index, call, 0), migrated) ? 1 : 0));
                     changes.add(new PlanChange(flow.key, index, "observe-map-values", migration.id(), encoder.id()));
@@ -518,7 +547,7 @@ final class RepresentationSolver {
                         MethodKey replacement = matchingTarget
                                 ? new MethodKey(call.owner, call.name, target.implementation().descriptor()) : original;
                         arguments.add(new RepresentationPlan.Argument(location(site), original, replacement, parameter,
-                                representation, encoder == null ? null : encoder.helper(), migration.id()));
+                                representation, encoder == null ? null : accessibleHelper(encoder.helper(), site), migration.id()));
                         changes.add(new PlanChange(flow.key, index, matchingTarget ? "reference-argument" : "encode-argument",
                                 migration.id(), encoder == null ? "" : encoder.id()));
                     }
@@ -531,9 +560,28 @@ final class RepresentationSolver {
     }
 
     private void edit(Site site, String action, RepresentationMigration.Rule rule) {
-        edits.add(new RepresentationPlan.Edit(location(site), action, rule == null ? null : rule.helper(), representation,
+        edits.add(new RepresentationPlan.Edit(location(site), action, rule == null ? null : accessibleHelper(rule.helper(), site), representation,
                 rule == null ? TypeRule.Binding.RECEIVER : rule.binding(), rule == null ? 0 : rule.parameter()));
         changes.add(new PlanChange(site.method(), site.index, action, migration.id(), rule == null ? "" : rule.id()));
+    }
+
+    private MethodKey accessibleHelper(MethodKey helper, Site site) {
+        ClassNode owner = classes.get(helper.owner());
+        MethodNode method = ClassFiles.findMethod(owner, helper.name(), helper.descriptor());
+        if (helper.owner().equals(site.method().owner()) || (method.access & Opcodes.ACC_PUBLIC) != 0) {
+            return helper;
+        }
+        return bridges.computeIfAbsent(helper, key -> {
+            String name = "mixinta$rule$" + key.name() + "$" + owner.methods.indexOf(method);
+            Set<String> names = new HashSet<>();
+            owner.methods.forEach(existing -> names.add(existing.name));
+            bridges.values().stream().filter(bridge -> bridge.method().owner().equals(owner.name))
+                    .forEach(bridge -> names.add(bridge.method().name()));
+            while (names.contains(name)) name += "$";
+            MethodKey bridge = new MethodKey(owner.name, name, key.descriptor());
+            changes.add(new PlanChange(bridge, -1, "generate-rule-bridge", migration.id(), key.toString()));
+            return new RepresentationPlan.Bridge(bridge, key);
+        }).method();
     }
 
     private void planLocalMetadata(MethodFlow flow) {

@@ -72,6 +72,9 @@ public final class TransformationPlan {
             for (RepresentationPlan.Argument argument : plan.arguments()) {
                 modified.add(argument.location().method().owner());
             }
+            for (RepresentationPlan.Bridge bridge : plan.bridges()) {
+                modified.add(bridge.method().owner());
+            }
         }
         for (CallSite call : calls) {
             MethodKey key = call.caller();
@@ -96,6 +99,14 @@ public final class TransformationPlan {
         Map<String, byte[]> output = ClassFiles.snapshot(classes);
         for (String name : modified.stream().sorted().toList()) {
             try {
+                for (MethodNode method : nodes.get(name).methods) {
+                    for (AbstractInsnNode instruction : method.instructions) {
+                        if (instruction instanceof MethodInsnNode call && call.getOpcode() == Opcodes.INVOKESTATIC
+                                && nodes.containsKey(call.owner)) {
+                            call.itf = (nodes.get(call.owner).access & Opcodes.ACC_INTERFACE) != 0;
+                        }
+                    }
+                }
                 ClassWriter writer = hierarchy.writer();
                 nodes.get(name).accept(writer);
                 byte[] bytes = writer.toByteArray();

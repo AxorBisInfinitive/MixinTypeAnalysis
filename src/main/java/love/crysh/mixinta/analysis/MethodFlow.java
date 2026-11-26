@@ -48,7 +48,6 @@ final class MethodFlow {
 
     void analyze() throws AnalyzerException {
         frames = new Analyzer<>(new Origins()).analyze(key.owner(), method);
-        aliases = new ContainerAliases(frames, allocations, origin -> point(indices.get(origin)));
     }
 
     ProgramPoint point(int index) {

@@ -56,6 +56,41 @@ final class ClassHierarchy {
         return node.interfaces.stream().anyMatch(parent -> isInherited(node, resolve(parent, name, descriptor)));
     }
 
+    /** 实例派发先选择类方法，再选择最具体接口中的唯一 default 实现。 */
+    MethodKey resolveVirtual(String owner, String name, String descriptor) {
+        Set<String> interfaces = new HashSet<>();
+        Set<String> visited = new HashSet<>();
+        String current = owner;
+        while (current != null && visited.add(current)) {
+            ClassNode node = get(current);
+            interfaces.addAll(node.interfaces);
+            var method = ClassFiles.findMethod(node, name, descriptor);
+            if (method != null && (method.access & (Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC)) == 0) {
+                return new MethodKey(current, name, descriptor);
+            }
+            current = node.superName;
+        }
+        Set<MethodKey> candidates = new HashSet<>();
+        ArrayDeque<String> pending = new ArrayDeque<>(interfaces);
+        visited.clear();
+        while (!pending.isEmpty()) {
+            current = pending.removeFirst();
+            if (!visited.add(current)) continue;
+            ClassNode node = get(current);
+            var method = ClassFiles.findMethod(node, name, descriptor);
+            if (method != null && (method.access & (Opcodes.ACC_PRIVATE | Opcodes.ACC_STATIC)) == 0) {
+                candidates.add(new MethodKey(current, name, descriptor));
+            }
+            pending.addAll(node.interfaces);
+        }
+        var implementations = candidates.stream()
+                .filter(candidate -> candidates.stream().noneMatch(other -> !other.equals(candidate)
+                        && isAssignable(candidate.owner(), other.owner())))
+                .filter(candidate -> (ClassFiles.findMethod(get(candidate.owner()), name, descriptor).access & Opcodes.ACC_ABSTRACT) == 0)
+                .toList();
+        return implementations.size() == 1 ? implementations.getFirst() : null;
+    }
+
     private boolean isInherited(ClassNode child, MethodKey key) {
         if (key == null) {
             return false;
@@ -114,7 +149,7 @@ final class ClassHierarchy {
         return "java/lang/Object";
     }
 
-    private boolean isAssignable(String destination, String source) {
+    boolean isAssignable(String destination, String source) {
         if (destination.equals(source) || destination.equals("java/lang/Object")) {
             return true;
         }

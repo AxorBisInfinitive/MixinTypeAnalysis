@@ -19,11 +19,12 @@ import java.util.Map;
 
 /** 只保存固定输入的位置和生成参数，apply 每次在独立节点上执行。 */
 record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local> locals,
-        List<PlanChange> changes, List<PropagationEdge> dependencies) {
+        List<Bridge> bridges, List<PlanChange> changes, List<PropagationEdge> dependencies) {
     RepresentationPlan {
         edits = List.copyOf(edits);
         arguments = List.copyOf(arguments);
         locals = List.copyOf(locals);
+        bridges = List.copyOf(bridges);
         changes = List.copyOf(changes);
         dependencies = List.copyOf(dependencies);
     }
@@ -150,7 +151,35 @@ record RepresentationPlan(List<Edit> edits, List<Argument> arguments, List<Local
     record Local(MethodKey method, int index, String descriptor, String signature) {
     }
 
+    record Bridge(MethodKey method, MethodKey helper) {
+        void apply(ClassNode owner) {
+            MethodNode existing = ClassFiles.findMethod(owner, method.name(), method.descriptor());
+            if (existing != null) {
+                long matches = java.util.Arrays.stream(existing.instructions.toArray()).filter(instruction ->
+                        instruction instanceof MethodInsnNode call && call.owner.equals(helper.owner())
+                                && call.name.equals(helper.name()) && call.desc.equals(helper.descriptor())).count();
+                if ((existing.access & Opcodes.ACC_SYNTHETIC) != 0 && matches == 1) return;
+                throw new IllegalStateException("Rule bridge collision " + method);
+            }
+            MethodNode bridge = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC | Opcodes.ACC_SYNTHETIC,
+                    method.name(), method.descriptor(), null, null);
+            int slot = 0;
+            for (Type parameter : Type.getArgumentTypes(method.descriptor())) {
+                bridge.instructions.add(new VarInsnNode(parameter.getOpcode(Opcodes.ILOAD), slot));
+                slot += parameter.getSize();
+            }
+            bridge.instructions.add(new MethodInsnNode(Opcodes.INVOKESTATIC, helper.owner(), helper.name(),
+                    helper.descriptor(), (owner.access & Opcodes.ACC_INTERFACE) != 0));
+            bridge.instructions.add(new InsnNode(Type.getReturnType(method.descriptor()).getOpcode(Opcodes.IRETURN)));
+            bridge.maxLocals = slot;
+            owner.methods.add(bridge);
+        }
+    }
+
     void apply(Map<String, ClassNode> nodes, Map<MethodKey, AbstractInsnNode[]> instructions) {
+        for (Bridge bridge : bridges) {
+            bridge.apply(nodes.get(bridge.method().owner()));
+        }
         for (Edit edit : edits) {
             MethodKey key = edit.location.method;
             MethodNode method = ClassFiles.findMethod(nodes.get(key.owner()), key.name(), key.descriptor());

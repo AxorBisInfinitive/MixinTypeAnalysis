@@ -135,7 +135,7 @@ class TypedContainerTest {
         return BytecodeFixtures.fixture("""
                 public static int sources;
                 public static BlockPos position(long value) { sources++; return new BlockPos(value); }
-                public static java.util.Queue<Long> external() { return new java.util.ArrayDeque<>(); }
+                public static native java.util.Queue<Long> external();
                 public static int lookup(long value) { return (int)value; }
                 public static long legacy(long value) { return value; }
                 public static long run(boolean flag) {
