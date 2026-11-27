@@ -1,0 +1,160 @@
+name: CI
+
+on:
+  push:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Core and Fabric tests
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - name: Checkout
+        id: checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Set up Zulu JDK 25
+        id: java
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: zulu
+          java-version: '25'
+          cache: maven
+          cache-dependency-path: |
+            pom.xml
+            exp/pom.xml
+            exp-fabric/pom.xml
+            exp-fabric-testmod/pom.xml
+
+      - name: 构建准备
+        id: prepare
+        timeout-minutes: 10
+        run: |
+          started=$(date +%s%N)
+          trap 'echo "duration_ns=$(( $(date +%s%N) - started ))" >> "$GITHUB_OUTPUT"' EXIT
+          mvn -B -ntp -DskipTests clean install
+          mvn -B -ntp -DskipTests -f exp/pom.xml clean install
+          mvn -B -ntp -DskipTests -f exp-fabric/pom.xml clean package
+
+      - name: 核心测试
+        id: core
+        continue-on-error: true
+        timeout-minutes: 5
+        run: |
+          started=$(date +%s%N)
+          trap 'echo "duration_ns=$(( $(date +%s%N) - started ))" >> "$GITHUB_OUTPUT"' EXIT
+          mvn -B -ntp test
+
+      - name: Fabric 集成测试
+        id: fabric
+        continue-on-error: true
+        timeout-minutes: 10
+        run: |
+          started=$(date +%s%N)
+          trap 'echo "duration_ns=$(( $(date +%s%N) - started ))" >> "$GITHUB_OUTPUT"' EXIT
+          mvn -B -ntp -f exp-fabric-testmod/pom.xml clean verify
+
+      - name: 汇总测试结果
+        if: ${{ always() }}
+        env:
+          CI_STEPS: ${{ toJSON(steps) }}
+          CI_JAVA_VERSION: ${{ steps.java.outputs.version }}
+        run: |
+          python3 - <<'PY'
+          import html
+          import json
+          import os
+          import xml.etree.ElementTree as ET
+          from pathlib import Path
+
+          steps = json.loads(os.environ["CI_STEPS"])
+          phases = [
+              ("prepare", "构建准备", None),
+              ("core", "核心测试", "target/surefire-reports"),
+              ("fabric", "Fabric 集成测试", "exp-fabric-testmod/target/failsafe-reports"),
+          ]
+          labels = {"success": "通过", "failure": "失败", "cancelled": "已取消", "skipped": "已跳过"}
+          counters = ("tests", "failures", "errors", "skipped")
+          rows = []
+          notes = []
+          passed = True
+          total_seconds = 0.0
+
+          for step_id, name in (("checkout", "源码检出"), ("java", "JDK 准备")):
+              outcome = steps.get(step_id, {}).get("outcome", "skipped")
+              if outcome != "success":
+                  passed = False
+                  notes.append(f"{name}{labels.get(outcome, outcome)}。")
+
+          for step_id, name, report_directory in phases:
+              step = steps.get(step_id, {})
+              outcome = step.get("outcome", "skipped")
+              phase_passed = outcome == "success"
+              elapsed = step.get("outputs", {}).get("duration_ns")
+              duration = "-"
+              if elapsed:
+                  seconds = int(elapsed) / 1_000_000_000
+                  total_seconds += seconds
+                  duration = f"{seconds:.2f} s"
+
+              counts = None
+              if report_directory and outcome not in ("skipped", "cancelled"):
+                  try:
+                      reports = sorted(Path(report_directory).glob("TEST-*.xml"))
+                      if not reports:
+                          raise ValueError("未生成测试报告")
+                      counts = dict.fromkeys(counters, 0)
+                      for report in reports:
+                          suite = ET.parse(report).getroot()
+                          for counter in counters:
+                              counts[counter] += int(suite.attrib[counter])
+                      if counts["tests"] == 0:
+                          raise ValueError("测试报告中的测试数为 0")
+                      if counts["failures"] or counts["errors"]:
+                          phase_passed = False
+                  except (OSError, ET.ParseError, KeyError, ValueError) as failure:
+                      phase_passed = False
+                      counts = None
+                      notes.append(f"{name}报告检查失败，{html.escape(str(failure))}。")
+
+              if outcome == "skipped":
+                  notes.append(f"{name}未执行，请查看前置步骤状态。")
+              elif outcome == "cancelled":
+                  notes.append(f"{name}已取消，请查看步骤日志。")
+              passed = passed and phase_passed
+              status = labels.get(outcome, outcome)
+              if outcome == "success" and not phase_passed:
+                  status = "失败"
+              values = [str(counts[counter]) if counts is not None else "-" for counter in counters]
+              rows.append("| " + " | ".join([name, status, duration, *values]) + " |")
+
+          commit = html.escape(os.environ["GITHUB_SHA"])
+          ref = html.escape(os.environ["GITHUB_REF"])
+          java = html.escape(os.environ.get("CI_JAVA_VERSION") or "未完成安装")
+          summary = [
+              "# CI 测试结果",
+              "",
+              f"整体结果 **{'通过' if passed else '失败'}**",
+              "",
+              f"提交 <code>{commit}</code><br>引用 <code>{ref}</code><br>环境 Ubuntu 24.04 / Zulu JDK {java}",
+              "",
+              "| 阶段 | 结果 | 耗时 | 测试数 | 失败 | 错误 | 跳过 |",
+              "| --- | --- | --- | --- | --- | --- | --- |",
+              *rows,
+              "",
+              f"已记录阶段耗时合计 **{total_seconds:.2f} s**。各阶段耗时包含 Maven 启动、编译及子 JVM 运行。",
+          ]
+          if notes:
+              summary.extend(["", *[f"- {note}" for note in notes]])
+          content = "\n".join(summary) + "\n"
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a", encoding="utf-8") as output:
+              output.write(content)
+          print(content)
+          raise SystemExit(0 if passed else 1)
+          PY
