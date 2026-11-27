@@ -1,5 +1,7 @@
 package love.crysh.mixinta.analysis.representation;
 
+import love.crysh.mixinta.analysis.AnalysisMetrics;
+
 import love.crysh.mixinta.analysis.container.ContainerAnalysis;
 import love.crysh.mixinta.analysis.container.ContainerContract;
 import love.crysh.mixinta.analysis.container.StorageSlot;
@@ -56,12 +58,18 @@ public final class RepresentationBatch {
 
     public static RepresentationBatchResult analyze(List<RepresentationMigration> declarations, Map<String, ClassNode> classes,
             Map<MethodKey, Migration> targets, ClassHierarchy hierarchy) {
+        return analyze(declarations, classes, targets, hierarchy, new AnalysisMetrics(), null);
+    }
+
+    public static RepresentationBatchResult analyze(List<RepresentationMigration> declarations, Map<String, ClassNode> classes,
+            Map<MethodKey, Migration> targets, ClassHierarchy hierarchy, AnalysisMetrics metrics, java.util.Set<MethodKey> scope) {
         List<BatchConflict> conflicts = new ArrayList<>();
         List<Session> sessions = declarations.stream().sorted(Comparator.comparing((RepresentationMigration value) -> value.target().toString())
                 .thenComparingInt(RepresentationMigration::parameter).thenComparing(RepresentationMigration::id))
                 .map(value -> new Session(List.of(value))).toList();
         var containers = ContainerAnalysis.analyzeAll(classes, targets.keySet(), hierarchy,
-                sessions.stream().map(session -> session.declarations.getFirst().containers()).toList());
+                sessions.stream().map(session -> session.declarations.getFirst().containers()).toList(), metrics, scope);
+        long representationStarted = System.nanoTime();
         Map<java.util.Set<ContainerContract>, RepresentationInput> inputs = new LinkedHashMap<>();
         containers.forEach((contracts, analysis) -> inputs.put(contracts, new RepresentationInput(analysis)));
         for (Session session : sessions) {
@@ -99,10 +107,13 @@ public final class RepresentationBatch {
         validateRules(sessions, facts, conflicts);
         List<Diagnostic> diagnostics = RepresentationDiagnostics.collect(sessions.stream().map(session ->
                 new RepresentationDiagnostics(session.declarations.getFirst(), session.input, session.validation, facts)).toList(), conflicts, facts);
+        metrics.add(AnalysisMetrics.Stage.REPRESENTATION, System.nanoTime() - representationStarted);
         if (!diagnostics.isEmpty()) return new RepresentationBatchResult(java.util.Optional.empty(), diagnostics);
+        long planningStarted = System.nanoTime();
         var plans = sessions.stream().map(session ->
                 new RepresentationPlanner(session.declarations, session.input, session.validation, targets, classes, hierarchy, facts).plan()).toList();
         var merged = RepresentationPlanMerger.merge(plans, classes);
+        metrics.add(AnalysisMetrics.Stage.PLAN, System.nanoTime() - planningStarted);
         return new RepresentationBatchResult(merged.plan(), RepresentationDiagnostics.planConflicts(merged.conflicts()));
     }
 

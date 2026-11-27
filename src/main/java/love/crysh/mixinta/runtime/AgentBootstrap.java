@@ -15,13 +15,19 @@ import java.util.jar.JarFile;
 final class AgentBootstrap {
     static final class Connection {
         private final Method loadedClasses;
+        private final Method captureDefinition;
 
         private Connection(Class<?> agent) throws NoSuchMethodException {
             loadedClasses = agent.getMethod("loadedClasses", ClassLoader.class);
+            captureDefinition = agent.getMethod("captureDefinition", Class.class);
         }
 
         Class<?>[] loadedClasses(ClassLoader loader) throws ReflectiveOperationException {
             return (Class<?>[]) loadedClasses.invoke(null, loader);
+        }
+
+        byte[] captureDefinition(Class<?> type) throws ReflectiveOperationException {
+            return (byte[]) captureDefinition.invoke(null, type);
         }
     }
 

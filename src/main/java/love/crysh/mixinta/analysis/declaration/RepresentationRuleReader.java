@@ -25,6 +25,16 @@ public final class RepresentationRuleReader {
     private RepresentationRuleReader() {
     }
 
+    /** 规则合并到目标前保存声明位置生成的 id，使独立规则 Mixin 可以自动发现。 */
+    public static void assignRuleIds(ClassNode owner) {
+        for (MethodNode method : owner.methods) {
+            AnnotationNode rule = ClassFiles.annotation(method.visibleAnnotations, RULE);
+            if (rule != null && ((String) ClassFiles.value(rule, "id", "")).isEmpty()) {
+                set(rule, "id", new MethodKey(owner.name, method.name, method.desc).toString());
+            }
+        }
+    }
+
     public static Set<String> requiredClasses(Map<String, byte[]> mixins) {
         Set<String> names = new TreeSet<>();
         for (byte[] bytes : mixins.values()) {
@@ -44,6 +54,12 @@ public final class RepresentationRuleReader {
     public static List<RepresentationMigration> read(AnnotationNode annotation, MethodKey target, MethodNode implementation,
             Map<String, ClassNode> originals, Map<String, ClassNode> mixins, ClassHierarchy hierarchy,
             List<Diagnostic> diagnostics) {
+        return read(annotation, target, implementation, originals, mixins, hierarchy, diagnostics, null);
+    }
+
+    public static List<RepresentationMigration> read(AnnotationNode annotation, MethodKey target, MethodNode implementation,
+            Map<String, ClassNode> originals, Map<String, ClassNode> mixins, ClassHierarchy hierarchy,
+            List<Diagnostic> diagnostics, Map<String, List<String>> effectiveTargets) {
         List<RepresentationMigration> result = new ArrayList<>();
         Set<Integer> claimed = new HashSet<>();
         Type[] before = Type.getArgumentTypes(target.descriptor());
@@ -68,7 +84,9 @@ public final class RepresentationRuleReader {
                     AnnotationNode mixin = ClassFiles.annotation(ruleClass.invisibleAnnotations, MixinAnnotations.MIXIN);
                     List<?> targets = (List<?>) ClassFiles.value(mixin, "value", List.of());
                     List<?> strings = (List<?>) ClassFiles.value(mixin, "targets", List.of());
-                    boolean matches = targets.size() + strings.size() == 1
+                    boolean matches = effectiveTargets != null
+                            ? effectiveTargets.getOrDefault(owner, List.of()).equals(List.of(target.owner()))
+                            : targets.size() + strings.size() == 1
                             && (targets.size() == 1 && ((Type) targets.getFirst()).getInternalName().equals(target.owner())
                             || strings.size() == 1 && strings.getFirst().toString().replace('.', '/').equals(target.owner()));
                     if (!matches) {
@@ -87,6 +105,7 @@ public final class RepresentationRuleReader {
                 }
                 List<RepresentationRule> rules = new ArrayList<>();
                 Set<String> ids = new HashSet<>();
+                assignRuleIds(ruleClass);
                 for (MethodNode helper : ruleClass.methods) {
                     AnnotationNode rule = ClassFiles.annotation(helper.visibleAnnotations, RULE);
                     if (rule == null) {
@@ -94,10 +113,6 @@ public final class RepresentationRuleReader {
                     }
                     MethodKey key = new MethodKey(owner, helper.name, helper.desc);
                     String ruleId = (String) ClassFiles.value(rule, "id", "");
-                    if (ruleId.isEmpty()) {
-                        ruleId = key.toString();
-                        set(rule, "id", ruleId);
-                    }
                     int version = (int) ClassFiles.value(rule, "version", 1);
                     if (version < 1 || !ids.add(ruleId)) {
                         throw new IllegalArgumentException("Invalid version or duplicate rule id=" + ruleId);

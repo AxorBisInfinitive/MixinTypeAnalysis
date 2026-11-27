@@ -48,15 +48,15 @@ class RuntimeInitializationIT {
         result.success();
         result.contains("EARLY_INPUT_UNAVAILABLE=early getClassByteArray access", "AGENT_CONNECTED",
                 "RESULT=25", "COUNTS=1/1/1 ANALYSES=1", "TARGET_FROM_MOD=true");
-        result.ordered("ADAPTER_START", "AGENT_CONNECTED", "DECLARATIONS_PREPARED", "PLUGIN_LOAD",
+        result.ordered("ADAPTER_START", "AGENT_CONNECTED", "PLUGIN_LOAD", "DECLARATIONS_PREPARED",
                 "BATCH_READY", "PLAIN_MOD_ENTRY", "BUSINESS_EXECUTED");
     }
 
     @Test
-    void preparesDeclarationsBeforeConfigurationSelection() throws Exception {
+    void preparesDiscoveredDeclarationsBeforeTargetApplication() throws Exception {
         Result result = launch("support-preloaded", "", Map.of(), List.of(), false, List.of());
         result.success();
-        result.ordered("DECLARATIONS_PREPARED", "PLUGIN_LOAD state=CONFIGURING", "BATCH_READY");
+        result.ordered("PLUGIN_LOAD state=CONFIGURING", "DECLARATIONS_PREPARED", "BATCH_READY");
     }
 
     @Test
@@ -64,7 +64,145 @@ class RuntimeInitializationIT {
         Result result = launch("inactive", "", Map.of(), List.of(), false, List.of("-Dprobe.noDeclarations=true"));
         result.success();
         result.contains("INACTIVE_RUNTIME_VERIFIED", "RESULT=2");
-        assertFalse(result.log().contains("A Java agent has been loaded dynamically"), result.log());
+        result.contains("AGENT_CONNECTED");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"plugin", "server", "client", "value", "excluded", "excluded-environment", "removed", "unchanged"})
+    void discoversOnlyEffectiveDeclarationsFromOrdinaryConfigurations(String kind) throws Exception {
+        Result result = launch("discovery-" + kind, "", Map.of(), List.of(), false,
+                List.of("-Dprobe.discovery=" + kind));
+        result.success();
+        if (kind.startsWith("excluded") || kind.equals("removed")) {
+            result.contains("RESULT=2", "INACTIVE_RUNTIME_VERIFIED");
+            assertFalse(result.log().contains("ANALYSIS_BEGIN"), result.log());
+        } else if (kind.equals("unchanged")) {
+            result.contains("RESULT=6", "LOCAL_OVERWRITE_VERIFIED");
+        } else {
+            result.contains("RESULT=25", "COUNTS=1/1/1 ANALYSES=1");
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void preparesOnlyTheTargetRetainedByTheNativePlugin(boolean unchanged) throws Exception {
+        String descriptor = unchanged ? "int a, int b" : "double a, double b";
+        String body = unchanged ? "a - b" : "(int) (a / b * 10)";
+        Result result = launch("partial-target-" + unchanged, "", Map.of(
+                "fixture.business.OtherSubject", """
+                        package fixture.business;
+                        public final class OtherSubject { public static int div(int a, int b) { return a / b; } }
+                        """,
+                "fixture.mixin.SubjectMixin", """
+                        package fixture.mixin;
+                        @org.spongepowered.asm.mixin.Mixin(targets={"fixture.business.Subject", "fixture.business.OtherSubject"}, remap=false)
+                        public class SubjectMixin {
+                            @love.crysh.mixinta.anno.TypedOverwrite(method="div(II)I")
+                            public static int div(%s) { return %s; }
+                        }
+                        """.formatted(descriptor, body)), List.of(), false,
+                List.of("-Dprobe.discovery=" + (unchanged ? "partial-unchanged" : "partial")));
+        result.success();
+        result.contains(unchanged ? "RESULT=6" : "RESULT=25");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"inactive", "local", "global"})
+    void handlesUnreadableInputsAccordingToTheEffectiveAnalysisScope(String scope) throws Exception {
+        List<String> options = new ArrayList<>(List.of("-Dprobe.brokenInput=true"));
+        if (scope.equals("inactive")) options.add("-Dprobe.noDeclarations=true");
+        if (scope.equals("local")) options.add("-Dprobe.discovery=unchanged");
+        Result result = launch("broken-input-" + scope, "", Map.of(), List.of(), false, options);
+        if (scope.equals("global")) {
+            result.failureBeforeBusiness("UNVERIFIABLE_ANALYSIS_INPUT", "fixture/unused/Broken", "PARSE_FAILED", "outputsPublished=false");
+        } else {
+            result.success();
+            result.contains(scope.equals("local") ? "LOCAL_OVERWRITE_VERIFIED" : "INACTIVE_RUNTIME_VERIFIED");
+        }
+    }
+
+    @Test
+    void reportsAResourceLostBetweenIndexingAndPreprocessing() throws Exception {
+        Result result = launch("missing-prepared-input", "", Map.of(), List.of(), false,
+                List.of("-Dprobe.missingPreparedInput=true"));
+        result.failureBeforeBusiness("UNVERIFIABLE_ANALYSIS_INPUT", "fixture/business/Subject",
+                "PREPROCESS_FAILED", "Preprocessed class resource is missing", "outputsPublished=false");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"remove", "reorder", "replace"})
+    void rejectsExistingBindingsChangedAfterPublication(String mutation) throws Exception {
+        Result result = launch("late-bindings-" + mutation, """
+                love.crysh.exp.fabric.testmod.initialization.InitializationProbePlugin.mutateBindings("%s");
+                Class.forName("fixture.business.Caller", false, Main.class.getClassLoader());
+                """.formatted(mutation), Map.of("fixture.mixin.OrdinaryMixin", """
+                package fixture.mixin;
+                @org.spongepowered.asm.mixin.Mixin(targets="fixture.business.Subject", remap=false)
+                public class OrdinaryMixin { private int ordinary; }
+                """), List.of(), false, List.of("-Dprobe.bindingMutation=true"));
+        result.failure("MIXIN_CONFIGURATION_CHANGED", "effective target bindings changed", "outputsPublished=true");
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void absorbsConfigurationsAndDevelopmentInputsAddedDuringPreparation(boolean existingRoot) throws Exception {
+        Result result = launch("preparation-expansion-" + existingRoot, """
+                var caller = Class.forName("fixture.expanded.Caller", true, Main.class.getClassLoader());
+                System.out.println("EXPANDED_CALLER=" + caller.getDeclaredMethod("call").invoke(null));
+                """, Map.of("fixture.expanded.Caller", """
+                package fixture.expanded;
+                public class Caller { public static int call() { return fixture.business.Subject.div(10, 4); } }
+                """, "fixture.extra.ExtraMixin", """
+                package fixture.extra;
+                @org.spongepowered.asm.mixin.Mixin(targets="fixture.business.Subject", remap=false)
+                public class ExtraMixin { private int extra; }
+                """), List.of(), false, List.of("-Dprobe.expandPreparation=true", "-Dprobe.existingRoot=" + existingRoot));
+        result.success();
+        result.contains("EXPANDED_CALLER=25", "RESULT=25", "COUNTS=1/1/1 ANALYSES=1");
+    }
+
+    @Test
+    void discardsTaProblemsFromCandidatesRemovedByNativeValidation() throws Exception {
+        Result result = launch("validation-removal", "", Map.of("fixture.mixin.RejectedMixin", """
+                package fixture.mixin;
+                @org.spongepowered.asm.mixin.Mixin(targets="fixture.business.Subject", remap=false)
+                public class RejectedMixin extends java.util.ArrayList<Object> {
+                    @love.crysh.mixinta.anno.TypedOverwrite(method="div(II)I")
+                    public static Object div(double a, double b) { return null; }
+                }
+                """), List.of(), false, List.of("-Dprobe.rejectedCandidate=true"));
+        result.success();
+        result.contains("RESULT=25");
+        assertFalse(result.log().contains("RETURN_TYPE_NOT_IMPLEMENTED"), result.log());
+    }
+
+    @Test
+    void discoversAnOrdinaryPackagedCallerBeforeItsFirstDefinition() throws Exception {
+        Result result = launch("discovered-caller", """
+                System.out.println("DISCOVERED_CALLER=" + fixture.other.LateNamedCaller.call());
+                """, Map.of("fixture.other.LateNamedCaller", """
+                package fixture.other;
+                public class LateNamedCaller { public static int call(){ return fixture.business.Subject.div(10,4); } }
+                """), List.of(), false, List.of());
+        result.success();
+        result.contains("DISCOVERED_CALLER=25", "RESULT=25");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"mod", "nested"})
+    void discoversCallersInAnotherModWithoutAMixinTADependency(String source) throws Exception {
+        Result result = launch("caller-source-" + source, "", Map.of(), List.of(), false,
+                List.of("-Dprobe.callerSource=" + source));
+        result.success();
+        result.contains("independent_caller 1.0.0", "RESULT=25", "COUNTS=1/1/1 ANALYSES=1");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"mutateBindings", "mutateSources"})
+    void rejectsBatchPremiseChangesDuringMixinApplication(String change) throws Exception {
+        Result result = launch(change, "", Map.of(), List.of(), false, List.of("-Dprobe." + change + "=true"));
+        result.failureBeforeBusiness(change.equals("mutateBindings") ? "effective target bindings changed" : "CLASS_SOURCES_CHANGED",
+                "outputsPublished=false");
     }
 
     @Test
@@ -80,9 +218,16 @@ class RuntimeInitializationIT {
     }
 
     @ParameterizedTest
-    @ValueSource(strings = {"concurrentConfig", "concurrentPlugin"})
+    @ValueSource(strings = {"concurrentConfig", "concurrentPlugin", "concurrentConfigUnrelated", "concurrentPluginUnrelated"})
     void rejectsCrossThreadParticipantRequestsDuringMixinWork(String option) throws Exception {
-        Result result = launch(option, "", Map.of(), List.of(), false, List.of("-Dprobe." + option + "=true"));
+        boolean unrelated = option.endsWith("Unrelated");
+        List<String> options = new ArrayList<>(List.of("-Dprobe." + option.replace("Unrelated", "") + "=true"));
+        Map<String, String> helpers = Map.of();
+        if (unrelated) {
+            options.add("-Dprobe.concurrentClass=fixture.support.Unrelated");
+            helpers = Map.of("fixture.support.Unrelated", "package fixture.support; public class Unrelated {}");
+        }
+        Result result = launch(option, "", helpers, List.of(), false, options);
         result.failureBeforeBusiness("CONCURRENT_PREPARATION", "PLUGIN_CONCURRENT_CAUGHT=");
         assertFalse(result.log().contains("BATCH_READY"), result.log());
     }
@@ -127,9 +272,10 @@ class RuntimeInitializationIT {
         assertFalse(result.log().contains("BATCH_READY"), result.log());
     }
 
-    @Test
-    void propagatesReferenceRepresentationsDuringAutomaticInitialization() throws Exception {
-        Map<String, String> sources = Map.of(
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void propagatesReferenceRepresentationsDuringAutomaticInitialization(boolean lateWriter) throws Exception {
+        Map<String, String> sources = new LinkedHashMap<>(Map.of(
                 SUBJECT, """
                         package fixture.business;
                         public final class Subject { public static int lookup(long value) { return (int)value; } }
@@ -163,17 +309,36 @@ class RuntimeInitializationIT {
                                 return java.util.Objects.requireNonNull(value);
                             }
                         }
-                        """);
-        Result result = launch("reference-propagation", """
+                        """));
+        if (lateWriter) sources.put("fixture.late.LateWriter", """
+                package fixture.late;
+                public class LateWriter { public static void write(java.util.Queue<Object> queue) { queue.add(12L); } }
+                """);
+        String defineWriter = lateWriter ? """
+                if (Boolean.getBoolean("probe.lateRepresentation")) {
+                try {
+                    love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.defineLate("fixture.late.LateWriter");
+                    throw new AssertionError("Late representation writer defined");
+                } catch (ClassFormatError expected) {
+                    love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.verifyPersistentFailure(true);
+                    throw expected;
+                }
+                }
+                """ : "";
+        Result result = launch("reference-propagation-" + lateWriter, """
                 fixture.business.Subject.class.getDeclaredMethod("lookup", fixture.business.BlockPos.class);
                 try {
                     fixture.business.Subject.class.getDeclaredMethod("lookup", long.class);
                     throw new AssertionError("Old lookup survived");
                 } catch (NoSuchMethodException expected) { }
                 System.out.println("REFERENCE_DESCRIPTOR_VERIFIED");
-                """, sources, List.of(), false, List.of());
-        result.success();
-        result.contains("RESULT=12", "REFERENCE_DESCRIPTOR_VERIFIED", "COUNTS=1/1/1 ANALYSES=1");
+                """ + defineWriter, sources, List.of(), false,
+                lateWriter ? List.of("-Dprobe.lateRepresentation=true") : List.of());
+        if (lateWriter) result.failure("LATE_REPRESENTATION_BOUNDARY fixture/late/LateWriter", "FAILURE_RETAINED OUTPUTS_PUBLISHED");
+        else {
+            result.success();
+            result.contains("RESULT=12", "REFERENCE_DESCRIPTOR_VERIFIED", "COUNTS=1/1/1 ANALYSES=1");
+        }
     }
 
     @Test
@@ -228,16 +393,15 @@ class RuntimeInitializationIT {
                 field.setAccessible(true);
                 var modified = (java.util.Set<String>) field.get(snapshot);
                 if (modified.contains("fixture/business/Forwarder") != %s) throw new AssertionError(modified);
-                field = snapshot.getClass().getDeclaredField("outputs");
-                field.setAccessible(true);
-                var outputs = (java.util.Map<String, byte[]>) field.get(snapshot);
+                var outputOf = snapshot.getClass().getDeclaredMethod("outputOf", String.class);
+                outputOf.setAccessible(true);
                 var node = new org.objectweb.asm.tree.ClassNode();
-                new org.objectweb.asm.ClassReader(outputs.get("fixture/business/Forwarder")).accept(node, 0);
+                new org.objectweb.asm.ClassReader((byte[]) outputOf.invoke(snapshot, "fixture/business/Forwarder")).accept(node, 0);
                 var pass = node.methods.stream().filter(method -> method.name.equals("pass")).findFirst().orElseThrow();
                 if (!pass.localVariables.getFirst().signature.equals("%s")) throw new AssertionError(pass.localVariables.getFirst().signature);
                 if (%s) {
                     node = new org.objectweb.asm.tree.ClassNode();
-                    new org.objectweb.asm.ClassReader(outputs.get("fixture/business/Caller")).accept(node, 0);
+                    new org.objectweb.asm.ClassReader((byte[]) outputOf.invoke(snapshot, "fixture/business/Caller")).accept(node, 0);
                     var run = node.methods.stream().filter(method -> method.name.equals("run")).findFirst().orElseThrow();
                     var bridges = java.util.Arrays.stream(run.instructions.toArray())
                             .filter(instruction -> instruction instanceof org.objectweb.asm.tree.MethodInsnNode call && call.name.startsWith("mixinta$rule$"))
@@ -463,6 +627,7 @@ class RuntimeInitializationIT {
         Result result = launch(scenario, """
                 if (Boolean.getBoolean("probe.lateCheck")) {
                     try {
+                        love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.defineLate("fixture.late.LateCaller");
                         Class.forName("fixture.late.LateCaller", false, Main.class.getClassLoader());
                         throw new AssertionError("Late caller unexpectedly defined");
                     } catch (ClassFormatError expected) {
@@ -503,6 +668,7 @@ class RuntimeInitializationIT {
         Result result = launch("late-" + kind, """
                 if (System.getProperty("probe.lateKind") != null) {
                     try {
+                        love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.defineLate("fixture.late.LateCaller");
                         Class.forName("fixture.late.LateCaller", false, Main.class.getClassLoader());
                         throw new AssertionError("Late reference unexpectedly defined");
                     } catch (ClassFormatError expected) {
@@ -583,6 +749,44 @@ class RuntimeInitializationIT {
                 }
                 """.formatted(mainBody));
         sources.putAll(helpers);
+        String discovery = options.stream().filter(option -> option.startsWith("-Dprobe.discovery="))
+                .map(option -> option.substring("-Dprobe.discovery=".length())).findFirst().orElse("");
+        if (discovery.equals("value")) {
+            sources.computeIfPresent("fixture.mixin.SubjectMixin", (name, source) -> source.replace(
+                    "targets=\"fixture.business.Subject\"", "value=fixture.business.Subject.class"));
+        }
+        if (discovery.startsWith("excluded") || discovery.equals("removed")) {
+            sources.computeIfPresent("fixture.mixin.SubjectMixin", (name, source) -> source.replace(
+                    "int div(double a, double b) { return (int) (a / b * 10); }",
+                    "Object div(double a, double b) { return null; }"));
+        }
+        if (discovery.equals("excluded-environment")) {
+            sources.computeIfPresent(SUBJECT, (name, source) -> source.replace("public final class Subject",
+                    "@net.fabricmc.api.Environment(net.fabricmc.api.EnvType.CLIENT) public final class Subject"));
+            sources.put("love.crysh.exp.Main", """
+                    package love.crysh.exp;
+                    public class Main { public static void main(String[] args) throws Exception {
+                        System.out.println("BUSINESS_EXECUTED");
+                        System.out.println("RESULT=2");
+                        love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.verify();
+                    } }
+                    """);
+        }
+        if (discovery.equals("unchanged")) {
+            sources.computeIfPresent("fixture.mixin.SubjectMixin", (name, source) -> source.replace(
+                    "int div(double a, double b) { return (int) (a / b * 10); }",
+                    "int div(int a, int b) { return a - b; }"));
+        }
+        if (discovery.equals("client")) sources.put("fixture.bootstrap.ClientLauncher", """
+                package fixture.bootstrap;
+                public class ClientLauncher { public static void main(String[] args) {
+                    net.fabricmc.loader.impl.launch.knot.Knot.launch(args, net.fabricmc.api.EnvType.CLIENT);
+                } }
+                """);
+        if (options.contains("-Dprobe.noDeclarations=true") && options.stream().anyMatch(option -> option.startsWith("-Dprobe.lateKind="))) {
+            sources.computeIfPresent("love.crysh.exp.Main", (name, source) -> source.replace("System.out.println(\"BUSINESS_EXECUTED\");",
+                    "System.out.println(\"BUSINESS_EXECUTED\"); " + PROBE + "InitializationProbeRuntime.defineLate(\"fixture.late.LateCaller\");"));
+        }
         compile(root, classes, sources);
         Map<String, byte[]> modEntries = new LinkedHashMap<>();
         Map<String, byte[]> appEntries = new LinkedHashMap<>();
@@ -591,6 +795,32 @@ class RuntimeInitializationIT {
             if (className.equals("love.crysh.exp.Main") || className.startsWith("love.crysh.exp.Main$")
                     || applicationClasses.contains(className)) appEntries.put(entry.getKey(), entry.getValue());
             else modEntries.put(entry.getKey(), entry.getValue());
+        }
+        if (options.contains("-Dprobe.brokenInput=true")) modEntries.put("fixture/unused/Broken.class", new byte[] {0});
+        Path preparationRoot = null;
+        if (options.contains("-Dprobe.expandPreparation=true")) {
+            preparationRoot = Files.createDirectories(root.resolve("expanded-root"));
+            String filename = options.contains("-Dprobe.existingRoot=true") ? "Caller.class.staged" : "Caller.class";
+            Path caller = preparationRoot.resolve("fixture/expanded/" + filename);
+            Files.createDirectories(caller.getParent());
+            Files.write(caller, modEntries.remove("fixture/expanded/Caller.class"));
+            modEntries.put("extra.mixins.json", """
+                    {"required":true,"minVersion":"0.8.7","package":"fixture.extra","compatibilityLevel":"JAVA_25",
+                     "mixins":["ExtraMixin"]}
+                    """.getBytes(StandardCharsets.UTF_8));
+        }
+        if (options.contains("-Dprobe.missingPreparedInput=true")) {
+            preparationRoot = Files.createDirectories(root.resolve("indexed-root"));
+            Path subject = preparationRoot.resolve("fixture/business/Subject.class");
+            Files.createDirectories(subject.getParent());
+            Files.write(subject, modEntries.remove("fixture/business/Subject.class"));
+        }
+        Path bootstrapClasses = null;
+        if (discovery.equals("client")) {
+            bootstrapClasses = Files.createDirectories(root.resolve("bootstrap"));
+            Path launcher = bootstrapClasses.resolve("fixture/bootstrap/ClientLauncher.class");
+            Files.createDirectories(launcher.getParent());
+            Files.write(launcher, modEntries.remove("fixture/bootstrap/ClientLauncher.class"));
         }
         if (options.contains("-Dprobe.duplicateApplicationClass=true")) {
             modEntries.put("fixture/business/Subject.class", appEntries.get("fixture/business/Subject.class"));
@@ -628,35 +858,52 @@ class RuntimeInitializationIT {
             node.accept(writer);
             modEntries.put("fixture/late/LateCaller.class", writer.toByteArray());
         }
+        if (options.contains("-Dprobe.lateCheck=true") || options.stream().anyMatch(option -> option.startsWith("-Dprobe.lateKind="))) {
+            byte[] bytes = modEntries.remove("fixture/late/LateCaller.class");
+            if (bytes != null) modEntries.put("late/fixture/late/LateCaller.class", bytes);
+        }
+        if (options.contains("-Dprobe.lateRepresentation=true")) {
+            modEntries.put("late/fixture/late/LateWriter.class", modEntries.remove("fixture/late/LateWriter.class"));
+        }
         String nested = "META-INF/jars/mixin-type-analysis-0.1.0-Snapshot.jar";
         try (JarFile packaged = new JarFile(PROJECT.resolve("target/exp-fabric-testmod-0.1.0-Snapshot.jar").toFile())) {
             try (var input = packaged.getInputStream(packaged.getJarEntry(nested))) {
                 modEntries.put(nested, input.readAllBytes());
             }
         }
-        List<String> domain = new ArrayList<>(List.of(SUBJECT, CALLER, "love.crysh.exp.Main"));
-        helpers.keySet().stream().filter(name -> name.startsWith("fixture.business.") && !domain.contains(name))
-                .sorted().forEach(domain::add);
         String metadata = """
                 {"schemaVersion":1,"id":"initialization_fixture","version":"1.0.0","environment":"*",
                  "languageAdapters":{"initialization_probe":"%sInitializationProbeAdapter"},
                  "entrypoints":{"main":["fixture.entry.MainEntry"],"preLaunch":[%s]},
-                 "mixins":["probe.mixins.json"],"depends":{"mixinta":"*"},"jars":[{"file":"%s"}],
-                 "custom":{"mixinta":{"classes":[%s],"mixins":["fixture.mixin.SubjectMixin"]}}%s}
-                """.formatted(PROBE, strings(preLaunch), nested, strings(domain),
+                 "mixins":["probe.mixins.json"],"depends":{"mixinta":"*"},"jars":[{"file":"%s"}]%s}
+                """.formatted(PROBE, strings(preLaunch), nested,
                 classTweaker ? ",\"accessWidener\":\"fixture.accesswidener\"" : "");
         if (options.contains("-Dprobe.noDeclarations=true")) {
-            metadata = metadata.replace("\"mixins\":[\"probe.mixins.json\"]", "\"mixins\":[]")
-                    .replace("\"classes\":[" + strings(domain) + "]", "\"classes\":[]")
-                    .replace("\"mixins\":[\"fixture.mixin.SubjectMixin\"]", "\"mixins\":[]");
+            metadata = metadata.replace("\"mixins\":[\"probe.mixins.json\"]", "\"mixins\":[]");
         }
         modEntries.put("fabric.mod.json", metadata.getBytes(StandardCharsets.UTF_8));
         modEntries.put("late.mixins.json", "{\"required\":true,\"package\":\"fixture.late.mixin\",\"mixins\":[]}"
                 .getBytes(StandardCharsets.UTF_8));
+        String declarations = switch (discovery) {
+            case "plugin" -> "\"mixins\":[]";
+            case "server" -> "\"mixins\":[],\"server\":[\"SubjectMixin\"],\"client\":[\"MissingClientMixin\"]";
+            case "client" -> "\"mixins\":[],\"client\":[\"SubjectMixin\"],\"server\":[\"MissingServerMixin\"]";
+            default -> "\"mixins\":[\"SubjectMixin\"]";
+        };
         modEntries.put("probe.mixins.json", ("""
                 {"required":true,"package":"fixture.mixin","compatibilityLevel":"JAVA_25",
-                 "plugin":"%sInitializationProbePlugin","mixins":["SubjectMixin"]}
-                """).formatted(PROBE).getBytes(StandardCharsets.UTF_8));
+                 "plugin":"%sInitializationProbePlugin",%s}
+                """).formatted(PROBE, declarations).getBytes(StandardCharsets.UTF_8));
+        if (options.contains("-Dprobe.rejectedCandidate=true")) {
+            String config = new String(modEntries.get("probe.mixins.json"), StandardCharsets.UTF_8);
+            modEntries.put("probe.mixins.json", config.replace("\"SubjectMixin\"", "\"SubjectMixin\",\"RejectedMixin\"")
+                    .getBytes(StandardCharsets.UTF_8));
+        }
+        if (options.contains("-Dprobe.bindingMutation=true")) {
+            String config = new String(modEntries.get("probe.mixins.json"), StandardCharsets.UTF_8);
+            modEntries.put("probe.mixins.json", config.replace("\"SubjectMixin\"", "\"SubjectMixin\",\"OrdinaryMixin\"")
+                    .getBytes(StandardCharsets.UTF_8));
+        }
         if (classTweaker) {
             String rules = """
                     accessWidener v2 official
@@ -674,6 +921,25 @@ class RuntimeInitializationIT {
         jar(appJar, appEntries);
         Path run = Files.createDirectories(root.resolve("run"));
         Path mods = Files.createDirectories(run.resolve("mods"));
+        String callerSource = options.stream().filter(option -> option.startsWith("-Dprobe.callerSource="))
+                .map(option -> option.substring("-Dprobe.callerSource=".length())).findFirst().orElse("");
+        if (!callerSource.isEmpty()) {
+            Map<String, byte[]> independent = new LinkedHashMap<>();
+            independent.put("fixture/business/Caller.class", modEntries.remove("fixture/business/Caller.class"));
+            independent.put("fabric.mod.json", """
+                    {"schemaVersion":1,"id":"independent_caller","version":"1.0.0","environment":"*"}
+                    """.getBytes(StandardCharsets.UTF_8));
+            if (callerSource.equals("mod")) jar(mods.resolve("independent.jar"), independent);
+            else {
+                Path nestedCaller = root.resolve("independent.jar");
+                jar(nestedCaller, independent);
+                String resource = "META-INF/jars/independent.jar";
+                modEntries.put(resource, Files.readAllBytes(nestedCaller));
+                metadata = metadata.replace("\"file\":\"" + nested + "\"}]",
+                        "\"file\":\"" + nested + "\"},{\"file\":\"" + resource + "\"}]");
+                modEntries.put("fabric.mod.json", metadata.getBytes(StandardCharsets.UTF_8));
+            }
+        }
         if (!preLaunch.isEmpty()) {
             Map<String, byte[]> earlyEntries = new LinkedHashMap<>();
             for (String entrypoint : preLaunch) {
@@ -700,11 +966,18 @@ class RuntimeInitializationIT {
         List<String> command = new ArrayList<>(List.of(Path.of(System.getProperty("java.home"), "bin", executable).toString(),
                 "-Djava.awt.headless=true", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"));
         command.addAll(options);
+        String analysis = System.getProperty("mixinta.analysis");
+        if (analysis != null) command.add("-Dmixinta.analysis=" + analysis);
+        if (preparationRoot != null) command.add("-Dprobe.extraRoot=" + preparationRoot);
+        if (options.contains("-Dprobe.mutateSources=true")) {
+            command.add("-Dprobe.extraRoot=" + Files.createDirectories(root.resolve("extra-source")));
+        }
         command.add("-Dexp.fabric.jar=" + appJar);
         command.add("-Dexp.fabric.runDir=" + run);
         command.add("-cp");
-        command.add(bridgeJar + File.pathSeparator + bridge.resolve("lib") + "/*");
-        command.add("love.crysh.exp.fabric.Launcher");
+        command.add(bridgeJar + File.pathSeparator + bridge.resolve("lib") + "/*"
+                + (bootstrapClasses == null ? "" : File.pathSeparator + bootstrapClasses));
+        command.add(bootstrapClasses == null ? "love.crysh.exp.fabric.Launcher" : "fixture.bootstrap.ClientLauncher");
         Path log = root.resolve("child.log");
         Process child = new ProcessBuilder(command).redirectErrorStream(true).redirectOutput(log.toFile()).start();
         try {

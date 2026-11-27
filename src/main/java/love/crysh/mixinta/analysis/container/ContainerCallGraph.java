@@ -15,6 +15,7 @@ import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.InvokeDynamicInsnNode;
 import org.objectweb.asm.tree.LdcInsnNode;
+import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.TypeInsnNode;
 
 import java.util.ArrayDeque;
@@ -39,6 +40,7 @@ public final class ContainerCallGraph {
     private static final StorageReferences EMPTY = new StorageReferences(Set.of(), Set.of(), false);
     private final Map<String, ClassNode> classes;
     private final ClassHierarchy hierarchy;
+    private final ContainerRules containers;
     private final Map<MethodKey, ContainerFlow> flows = new LinkedHashMap<>();
     private final Map<MethodKey, ContainerMethodAnalyzer> analyzers = new LinkedHashMap<>();
     private final Map<MethodKey, MethodContainerSummary> summaries = new LinkedHashMap<>();
@@ -50,10 +52,13 @@ public final class ContainerCallGraph {
     private final Set<MethodKey> openEntries = new LinkedHashSet<>();
     private final Map<MethodKey, Set<ProgramPoint>> incoming = new LinkedHashMap<>();
     private final Set<MethodKey> rooted = new LinkedHashSet<>();
+    private final Map<MethodKey, Set<MethodKey>> virtualTargets = new LinkedHashMap<>();
+    private final Map<String, List<ClassNode>> receiverClasses = new LinkedHashMap<>();
 
     ContainerCallGraph(Map<String, ClassNode> classes, List<ContainerFlow> methods, ClassHierarchy hierarchy, ContainerRules containers) {
         this.classes = classes;
         this.hierarchy = hierarchy;
+        this.containers = containers;
         for (ContainerFlow flow : methods) {
             flows.put(flow.source().key(), flow);
             var analyzer = new ContainerMethodAnalyzer(flow, containers);
@@ -231,6 +236,15 @@ public final class ContainerCallGraph {
     }
 
     private Dispatch dispatch(MethodContainerSummary.Call call) {
+        if (call.receiver() != null && call.intrinsic() == null) {
+            MethodInsnNode instruction = (MethodInsnNode) flows.get(call.point().method()).source().instruction(call.point().instruction());
+            StorageReferences receiver = resolve(call.point().method(), call.receiver());
+            if (!receiver.references().isEmpty() && receiver.unknownOrigins().isEmpty()
+                    && containers.resolve(instruction, receiver) != null) {
+                // 接收者视图确定的操作由契约处理，避免将存储绑定到无关的接口实现。
+                return new Dispatch(Set.of(), true, false, "modeled receiver operation");
+            }
+        }
         MethodKey declared = declaredTarget(call);
         if (call.opcode() == Opcodes.INVOKESTATIC || call.opcode() == Opcodes.INVOKESPECIAL || fixed(declared)) {
             Set<MethodKey> targets = declared == null ? Set.of() : Set.of(declared);
@@ -269,16 +283,18 @@ public final class ContainerCallGraph {
         if (call.opcode() == Opcodes.INVOKESTATIC || call.opcode() == Opcodes.INVOKESPECIAL || fixed(declared)) {
             return declared == null ? Set.of() : Set.of(declared);
         }
-        Set<MethodKey> result = new LinkedHashSet<>();
-        if (declared != null) result.add(declared);
-        for (ClassNode candidate : classes.values()) {
-            if ((candidate.access & (Opcodes.ACC_INTERFACE | Opcodes.ACC_ABSTRACT)) == 0
-                    && mayBeSubtype(call.target().owner(), candidate.name)) {
-                MethodKey target = resolveTarget(candidate.name, call.target());
+        return virtualTargets.computeIfAbsent(call.target(), signature -> {
+            Set<MethodKey> result = new LinkedHashSet<>();
+            if (declared != null) result.add(declared);
+            List<ClassNode> candidates = receiverClasses.computeIfAbsent(signature.owner(), owner -> classes.values().stream()
+                    .filter(candidate -> (candidate.access & (Opcodes.ACC_INTERFACE | Opcodes.ACC_ABSTRACT)) == 0
+                            && mayBeSubtype(owner, candidate.name)).toList());
+            for (ClassNode candidate : candidates) {
+                MethodKey target = resolveTarget(candidate.name, signature);
                 if (target != null) result.add(target);
             }
-        }
-        return Set.copyOf(result);
+            return Set.copyOf(result);
+        });
     }
 
     private MethodKey declaredTarget(MethodContainerSummary.Call call) {

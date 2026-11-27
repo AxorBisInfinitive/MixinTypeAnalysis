@@ -78,6 +78,15 @@ public final class TransformationPlan {
     }
 
     public Map<String, byte[]> apply() {
+        return apply(false);
+    }
+
+    /** 运行时已有完整阶段输入，仅读取需要发布的 TA 改写结果。 */
+    public Map<String, byte[]> applyChanges() {
+        return apply(true);
+    }
+
+    private Map<String, byte[]> apply(boolean sparse) {
         List<Diagnostic> diagnostics = new ArrayList<>();
         Map<String, ClassNode> nodes = AnalysisClassReader.readAll(classes, diagnostics);
         Map<MethodKey, AbstractInsnNode[]> originalInstructions = new HashMap<>();
@@ -125,7 +134,7 @@ public final class TransformationPlan {
         }
 
         ClassHierarchy hierarchy = new ClassHierarchy(nodes, resources);
-        Map<String, byte[]> output = ClassFiles.snapshot(classes);
+        Map<String, byte[]> output = sparse ? new java.util.LinkedHashMap<>() : ClassFiles.snapshot(classes);
         for (String name : modified.stream().sorted().toList()) {
             try {
                 for (MethodNode method : nodes.get(name).methods) {

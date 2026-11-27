@@ -44,6 +44,50 @@ class TypedOverwriteIT {
     Path temporary;
 
     @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void discoversRuleMethodsFromASeparateOrdinaryMixin(boolean partialTargets) throws Exception {
+        Map<String, String> app = new LinkedHashMap<>();
+        app.put("love.crysh.exp.BlockPos", "package love.crysh.exp; public record BlockPos(long value){public long asLong(){return value;}}");
+        app.put(SUBJECT, "package love.crysh.exp; public class Subject { public static int lookup(long value){return (int)value;} }");
+        app.put("love.crysh.exp.Main", """
+                package love.crysh.exp;
+                public class Main { public static void main(String[] args) throws Exception {
+                    System.out.println("BUSINESS_EXECUTED");
+                    System.out.println("RESULT=" + Subject.lookup(new BlockPos(12).asLong()));
+                    Subject.class.getDeclaredMethod("lookup", BlockPos.class);
+                } }
+                """);
+        int rules = REFERENCE_MIXIN.indexOf("@love.crysh.mixinta.anno.TypeRule");
+        Map<String, String> declarations = new LinkedHashMap<>();
+        declarations.put("SubjectMixin", mixin("SubjectMixin", 1000,
+                REFERENCE_MIXIN.substring(0, rules).replace("rules=SubjectMixin.class", "rules=RulesMixin.class")));
+        declarations.put("RulesMixin", mixin("RulesMixin", 1000, REFERENCE_MIXIN.substring(rules)));
+        Map<String, String> helpers = new LinkedHashMap<>();
+        if (partialTargets) {
+            app.put("love.crysh.exp.OtherSubject", "package love.crysh.exp; public class OtherSubject { }");
+            declarations.computeIfPresent("RulesMixin", (name, source) -> source.replace(
+                    "targets=\"" + SUBJECT + "\"", "targets={\"" + SUBJECT + "\",\"love.crysh.exp.OtherSubject\"}"));
+            helpers.put("fixture.Plugin", """
+                    package fixture;
+                    public class Plugin implements org.spongepowered.asm.mixin.extensibility.IMixinConfigPlugin {
+                        public void onLoad(String name) { }
+                        public String getRefMapperConfig() { return null; }
+                        public boolean shouldApplyMixin(String target, String mixin) { return !target.endsWith("OtherSubject"); }
+                        public void acceptTargets(java.util.Set<String> targets, java.util.Set<String> others) { }
+                        public java.util.List<String> getMixins() { return null; }
+                        public void preApply(String name, org.objectweb.asm.tree.ClassNode node, String mixin,
+                                org.spongepowered.asm.mixin.extensibility.IMixinInfo info) { }
+                        public void postApply(String name, org.objectweb.asm.tree.ClassNode node, String mixin,
+                                org.spongepowered.asm.mixin.extensibility.IMixinInfo info) { }
+                    }
+                    """);
+        }
+        Result result = launch(app, declarations, List.of(), helpers);
+        result.success();
+        result.contains("RESULT=12");
+    }
+
+    @ParameterizedTest
     @ValueSource(strings = {"caller", "target"})
     void migratesCrossClassCallsInEitherLoadOrderAndMixinIntroducedCalls(String order) throws Exception {
         Map<String, String> app = application("public static int div(int a,int b){return a/b;}", """
@@ -883,15 +927,14 @@ class TypedOverwriteIT {
         String metadata = """
                 {"schemaVersion":1,"id":"integration_fixture","version":"1.0.0","environment":"*",
                  "entrypoints":{"main":["%s"]},"mixins":["fixture.mixins.json"],
-                 "depends":{"mixinta":"*"},"jars":[{"file":"%s"}],
-                 "custom":{"mixinta":{"classes":[%s],"mixins":[%s]}}}
-                """.formatted(entrypoint, nested, strings(app.keySet().stream().toList()),
-                strings(mixins.keySet().stream().map(name -> MIXIN_PACKAGE + "." + name).toList()));
+                 "depends":{"mixinta":"*"},"jars":[{"file":"%s"}]}
+                """.formatted(entrypoint, nested);
         modEntries.put("fabric.mod.json", metadata.getBytes(StandardCharsets.UTF_8));
+        String plugin = helpers.containsKey("fixture.Plugin") ? "\"plugin\":\"fixture.Plugin\"," : "";
         modEntries.put("fixture.mixins.json", ("""
                 {"required":true,"package":"fixture.mixin","compatibilityLevel":"JAVA_25",
-                 "plugin":"%s","mixins":[%s],"injectors":{"defaultRequire":1}}
-                """).formatted(helpers.containsKey("fixture.Plugin") ? "fixture.Plugin" : "love.crysh.mixinta.runtime.TypedOverwritePlugin",
+                 %s"mixins":[%s],"injectors":{"defaultRequire":1}}
+                """).formatted(plugin,
                 strings(mixins.keySet().stream().toList())).getBytes(StandardCharsets.UTF_8));
         jar(mods.resolve("fixture.jar"), modEntries);
         Path bridge = PROJECT.getParent().resolve("exp-fabric/target");
@@ -903,6 +946,8 @@ class TypedOverwriteIT {
         command.add("-Dstdout.encoding=UTF-8");
         command.add("-Dstderr.encoding=UTF-8");
         command.addAll(vmOptions);
+        String analysis = System.getProperty("mixinta.analysis");
+        if (analysis != null) command.add("-Dmixinta.analysis=" + analysis);
         command.add("-Dexp.fabric.jar=" + appJar);
         command.add("-Dexp.fabric.runDir=" + run);
         command.add("-cp");

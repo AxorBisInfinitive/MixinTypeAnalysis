@@ -51,6 +51,22 @@ class TypedOverwriteAnalyzerTest {
         var first = plan.apply();
         var second = plan.apply();
         first.forEach((name, bytes) -> assertArrayEquals(bytes, second.get(name)));
+        var sparse = plan.applyChanges();
+        assertEquals(plan.modifiedClasses(), sparse.keySet());
+        sparse.forEach((name, bytes) -> assertArrayEquals(first.get(name), bytes));
+    }
+
+    @Test
+    void runtimePreparationKeepsTheDeclaredMemberShape() {
+        var fixture = BytecodeFixtures.fixture(ORIGINAL, TYPED);
+        var runtime = new TypedOverwriteAnalyzer().prepareRuntime(fixture.originals(), fixture.mixins(),
+                Map.of("sample/SubjectMixin", List.of("sample/Subject")));
+        var method = ClassFiles.findMethod(ClassFiles.read(runtime.mixins().get("sample/SubjectMixin")), "div", "(DD)I");
+        assertEquals(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, method.access);
+        assertTrue(runtime.hasMigrations());
+        var node = ClassFiles.read(fixture.mixins().get("sample/SubjectMixin"));
+        new TypedOverwriteAnalyzer().projectDeclarations(node, List.of("sample/Subject"));
+        assertEquals(method.access, ClassFiles.findMethod(node, "div", "(DD)I").access);
     }
 
     @Test

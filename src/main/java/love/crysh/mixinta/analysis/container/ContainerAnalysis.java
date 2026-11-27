@@ -1,6 +1,7 @@
 package love.crysh.mixinta.analysis.container;
 
 import love.crysh.mixinta.analysis.flow.MethodFlow;
+import love.crysh.mixinta.analysis.AnalysisMetrics;
 import love.crysh.mixinta.bytecode.ClassHierarchy;
 import love.crysh.mixinta.model.MethodKey;
 
@@ -46,7 +47,14 @@ public final class ContainerAnalysis {
     public static Map<Set<ContainerContract>, ContainerAnalysis> analyzeAll(Map<String, ClassNode> classes,
             Set<MethodKey> targets, ClassHierarchy hierarchy,
             java.util.Collection<? extends java.util.Collection<ContainerContract>> contractGroups) {
-        Builder builder = new Builder(classes, targets, hierarchy);
+        return analyzeAll(classes, targets, hierarchy, contractGroups, new AnalysisMetrics(), null);
+    }
+
+    public static Map<Set<ContainerContract>, ContainerAnalysis> analyzeAll(Map<String, ClassNode> classes,
+            Set<MethodKey> targets, ClassHierarchy hierarchy,
+            java.util.Collection<? extends java.util.Collection<ContainerContract>> contractGroups,
+            AnalysisMetrics metrics, Set<MethodKey> scope) {
+        Builder builder = new Builder(classes, targets, hierarchy, metrics, scope);
         Map<Set<ContainerContract>, ContainerAnalysis> completed = new LinkedHashMap<>();
         contractGroups.stream().map(Set::copyOf).distinct()
                 .sorted(java.util.Comparator.comparing(Builder::groupKey))
@@ -59,11 +67,15 @@ public final class ContainerAnalysis {
         private final Set<MethodKey> targets;
         private final ClassHierarchy hierarchy;
         private final Map<MethodKey, MethodFlow> sources = new LinkedHashMap<>();
+        private final AnalysisMetrics metrics;
+        private final Set<MethodKey> scope;
 
-        Builder(Map<String, ClassNode> classes, Set<MethodKey> targets, ClassHierarchy hierarchy) {
+        Builder(Map<String, ClassNode> classes, Set<MethodKey> targets, ClassHierarchy hierarchy, AnalysisMetrics metrics, Set<MethodKey> scope) {
             this.classes = classes;
             this.targets = Set.copyOf(targets);
             this.hierarchy = hierarchy;
+            this.metrics = metrics;
+            this.scope = scope;
         }
 
         private static String groupKey(Set<ContainerContract> contracts) {
@@ -71,6 +83,8 @@ public final class ContainerAnalysis {
         }
 
         private ContainerAnalysis analyze(Set<ContainerContract> contracts) {
+            long containerStarted = System.nanoTime();
+            long flowBefore = metrics.nanos().getOrDefault(AnalysisMetrics.Stage.DATAFLOW, 0L);
             ContainerRules containers = new ContainerRules(contracts.stream().sorted(java.util.Comparator.comparing(Object::toString)).toList());
             List<ContainerFlow> flows = new ArrayList<>();
             List<Failure> failures = new ArrayList<>();
@@ -79,12 +93,23 @@ public final class ContainerAnalysis {
                 for (MethodNode method : owner.methods) {
                     MethodKey key = new MethodKey(owner.name, method.name, method.desc);
                     if (targets.contains(key) || containers.models(key)) continue;
+                    if (scope != null && !scope.contains(key)) continue;
                     if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
                         summaries.put(key, ContainerMethodAnalyzer.unavailable(key, method.access));
                         continue;
                     }
-                    MethodFlow source = sources.computeIfAbsent(key, ignored -> new MethodFlow(owner.name, method));
+                    MethodFlow source = sources.get(key);
+                    if (source == null) {
+                        long started = System.nanoTime();
+                        source = new MethodFlow(owner.name, method);
+                        metrics.add(AnalysisMetrics.Stage.DATAFLOW, System.nanoTime() - started);
+                        metrics.count(AnalysisMetrics.Count.ANALYZED_METHODS, 1);
+                        sources.put(key, source);
+                    } else {
+                        metrics.count(AnalysisMetrics.Count.FLOW_CACHE_HITS, 1);
+                    }
                     ContainerFlow flow = new ContainerFlow(source, containers);
+                    metrics.count(AnalysisMetrics.Count.SUMMARY_CONTEXTS, 1);
                     flows.add(flow);
                     if (source.failure() != null) failures.add(new Failure(flow, source.failure().getMessage()));
                 }
@@ -108,6 +133,8 @@ public final class ContainerAnalysis {
                 }
             }
             ContainerEffects effects = ContainerEffects.collect(flows, summaries, graph, containers, accesses);
+            long flowElapsed = metrics.nanos().getOrDefault(AnalysisMetrics.Stage.DATAFLOW, 0L) - flowBefore;
+            metrics.add(AnalysisMetrics.Stage.CONTAINER, System.nanoTime() - containerStarted - flowElapsed);
             return new ContainerAnalysis(flows, summaries, graph, failures, accesses, effects);
         }
 

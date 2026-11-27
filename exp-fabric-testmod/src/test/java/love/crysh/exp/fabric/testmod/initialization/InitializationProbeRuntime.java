@@ -68,8 +68,14 @@ public final class InitializationProbeRuntime {
                     VERIFIED_DEFINITION_INPUTS.add(message.substring("MixinTA verified definition input ".length()));
                 }
                 if (message.equals("MixinTA bootstrap connected")) System.out.println("AGENT_CONNECTED");
+                if (message.equals("MixinTA phase=PREPARING") && Boolean.getBoolean("probe.missingPreparedInput")) {
+                    try {
+                        java.nio.file.Files.delete(Path.of(System.getProperty("probe.extraRoot"), "fixture/business/Subject.class"));
+                    } catch (java.io.IOException failure) { throw new AssertionError(failure); }
+                }
                 if (message.equals("MixinTA declarations prepared")) System.out.println("DECLARATIONS_PREPARED");
                 if (message.equals("MixinTA batch ready")) System.out.println("BATCH_READY");
+                if (message.startsWith("MixinTA metrics ")) System.out.println(message);
                 if (message.equals("MixinTA failure retained") && Boolean.getBoolean("probe.verifyFailure")) {
                     verifyPersistentFailure(false);
                 }
@@ -119,12 +125,23 @@ public final class InitializationProbeRuntime {
     }
 
     public static void verify() throws Exception {
+        if (System.getProperty("probe.discovery", "").endsWith("unchanged")) {
+            if (!state().equals("READY") || runtimeField("result") != null || ANALYSES.get() != 0) {
+                throw new AssertionError("Unchanged descriptor triggered global analysis");
+            }
+            System.out.println("LOCAL_OVERWRITE_VERIFIED");
+            return;
+        }
         if (state().equals("INACTIVE")) {
             if (runtimeField("result") != null || ANALYSES.get() != 0) throw new AssertionError("Inactive runtime performed analysis");
             System.out.println("INACTIVE_RUNTIME_VERIFIED");
             return;
         }
         if (!state().equals("READY") || ANALYSES.get() != 1) throw new AssertionError("state=" + state());
+        Object snapshot = runtimeField("result");
+        if (!((Map<?, ?>) field(snapshot, "outputs")).keySet().equals(field(snapshot, "modifiedClasses"))) {
+            throw new AssertionError("TA output is not sparse");
+        }
         for (Thread thread : THREADS) {
             thread.join(10000);
             if (thread.isAlive()) throw new AssertionError("Concurrent loading deadlocked");
@@ -248,6 +265,25 @@ public final class InitializationProbeRuntime {
         System.out.println("FAILURE_RETAINED OUTPUTS_" + (published ? "PUBLISHED" : "ABSENT"));
     }
 
+    /** 资源字节在批次发布后才送入 Knot 定义，验证真正的迟到类边界。 */
+    public static void defineLate(String name) throws Exception {
+        byte[] bytes;
+        try (var input = LOADER.getResourceAsStream("late/" + name.replace('.', '/') + ".class")) {
+            if (input == null) throw new AssertionError("Missing late class resource " + name);
+            bytes = input.readAllBytes();
+        }
+        var define = LOADER.getClass().getDeclaredMethod("defineClassFwd", String.class, byte[].class,
+                int.class, int.class, java.security.CodeSource.class);
+        define.setAccessible(true);
+        try {
+            define.invoke(LOADER, name, bytes, 0, bytes.length, null);
+        } catch (java.lang.reflect.InvocationTargetException failure) {
+            if (failure.getCause() instanceof Error error) throw error;
+            if (failure.getCause() instanceof Exception cause) throw cause;
+            throw new AssertionError(failure.getCause());
+        }
+    }
+
     private static Object runtimeField(String name) {
         try {
             var field = TypedOverwriteRuntime.class.getDeclaredField(name);
@@ -270,7 +306,14 @@ public final class InitializationProbeRuntime {
 
     @SuppressWarnings("unchecked")
     private static Map<String, byte[]> snapshotMap(String name) {
-        return (Map<String, byte[]>) field(runtimeField("result"), name);
+        Object snapshot = runtimeField("result");
+        try {
+            var method = snapshot.getClass().getDeclaredMethod(name);
+            method.setAccessible(true);
+            return (Map<String, byte[]>) method.invoke(snapshot);
+        } catch (ReflectiveOperationException failure) {
+            throw new AssertionError(failure);
+        }
     }
 
     private static ClassNode node(byte[] bytes) {

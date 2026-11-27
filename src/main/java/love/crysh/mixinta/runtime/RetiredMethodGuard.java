@@ -15,7 +15,7 @@ import java.util.function.BiFunction;
 final class RetiredMethodGuard {
     static void check(RuntimeSnapshot snapshot, String name, byte[] bytes, ClassByteSource dependencies,
             BiFunction<String, String, IllegalStateException> failure) {
-        if (snapshot.retiredMethods().isEmpty() || name.startsWith("love/crysh/mixinta/")) return;
+        if (snapshot.retiredMethods().isEmpty()) return;
         ClassNode node = ClassFiles.read(bytes);
         Map<String, ClassNode> nodes = new HashMap<>();
         snapshot.afterMixins().forEach((key, value) -> nodes.put(key, ClassFiles.read(value)));

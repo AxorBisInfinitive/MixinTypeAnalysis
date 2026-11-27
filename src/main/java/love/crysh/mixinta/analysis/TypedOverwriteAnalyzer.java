@@ -51,6 +51,23 @@ public final class TypedOverwriteAnalyzer {
     }
 
     public PreparedOverwrites prepare(Map<String, byte[]> originals, Map<String, byte[]> mixinClasses) {
+        return prepare(originals, mixinClasses, null);
+    }
+
+    /** effectiveTargets 使用运行时已经完成筛选的目标，独立分析传入 null 时读取注解。 */
+    public PreparedOverwrites prepare(Map<String, byte[]> originals, Map<String, byte[]> mixinClasses,
+            Map<String, List<String>> effectiveTargets) {
+        return prepare(originals, mixinClasses, effectiveTargets, true);
+    }
+
+    /** 运行时通过已登记的方法适配 Mixin 检查，准备节点保留原始访问属性。 */
+    public PreparedOverwrites prepareRuntime(Map<String, byte[]> originals, Map<String, byte[]> mixinClasses,
+            Map<String, List<String>> effectiveTargets) {
+        return prepare(originals, mixinClasses, effectiveTargets, false);
+    }
+
+    private PreparedOverwrites prepare(Map<String, byte[]> originals, Map<String, byte[]> mixinClasses,
+            Map<String, List<String>> effectiveTargets, boolean syntheticImplementations) {
         Map<String, byte[]> originalSnapshot = ClassFiles.snapshot(originals);
         List<Diagnostic> diagnostics = new ArrayList<>();
         Map<String, ClassNode> targets = AnalysisClassReader.readAll(originalSnapshot, diagnostics);
@@ -64,7 +81,8 @@ public final class TypedOverwriteAnalyzer {
             if (mixinAnnotation == null) {
                 mixinAnnotation = ClassFiles.annotation(mixin.visibleAnnotations, MixinAnnotations.MIXIN);
             }
-            List<String> targetNames = targetNames(mixinAnnotation);
+            List<String> targetNames = effectiveTargets == null ? targetNames(mixinAnnotation)
+                    : effectiveTargets.getOrDefault(mixin.name, List.of());
             for (MethodNode method : mixin.methods) {
                 AnnotationNode annotation = ClassFiles.annotation(method.visibleAnnotations, MixinAnnotations.TYPED_OVERWRITE);
                 if (annotation == null) {
@@ -103,7 +121,7 @@ public final class TypedOverwriteAnalyzer {
                     nativeOverwrite = false;
                     MethodKey targetKey = new MethodKey(target.name, original.name, original.desc);
                     List<RepresentationMigration> representations = RepresentationRuleReader.read(annotation, targetKey, method,
-                            targets, mixins, hierarchy, diagnostics);
+                            targets, mixins, hierarchy, diagnostics, effectiveTargets);
                     validateMigration(target, original, method, location, hierarchy, representations, diagnostics);
                     if (targetNames.size() > 1) {
                         diagnostics.add(problem("MULTI_TARGET_NOT_IMPLEMENTED", location, "Parameter migration needs one target class"));
@@ -122,7 +140,7 @@ public final class TypedOverwriteAnalyzer {
                     annotation.desc = MixinAnnotations.OVERWRITE;
                     removeValue(annotation, "method");
                     removeValue(annotation, "parameters");
-                } else if ((method.access & Opcodes.ACC_STATIC) != 0
+                } else if (syntheticImplementations && (method.access & Opcodes.ACC_STATIC) != 0
                         && (method.access & Opcodes.ACC_PRIVATE) == 0) {
                     // Mixin 会重命名非 public synthetic 方法，最终 access 从声明快照恢复。
                     method.access = (method.access & ~Opcodes.ACC_PROTECTED) | Opcodes.ACC_PUBLIC | Opcodes.ACC_SYNTHETIC;
@@ -133,6 +151,45 @@ public final class TypedOverwriteAnalyzer {
         Map<String, byte[]> preparedMixins = new LinkedHashMap<>();
         mixins.forEach((name, node) -> preparedMixins.put(name, ClassFiles.write(node)));
         return new PreparedOverwrites(originalSnapshot, preparedMixins, migrations, resources);
+    }
+
+    /** 仅改变目标相关注解，原生验证和应用节点共享此投影，TA 问题由最终绑定统一验证。 */
+    public void projectDeclarations(ClassNode mixin, List<String> targetNames) {
+        for (MethodNode method : mixin.methods) {
+            AnnotationNode annotation = ClassFiles.annotation(method.visibleAnnotations, MixinAnnotations.TYPED_OVERWRITE);
+            if (annotation == null || targetNames.isEmpty()) continue;
+            String selector = (String) ClassFiles.value(annotation, "method", "");
+            int start = selector.indexOf('(');
+            boolean nativeOverwrite = start > 0 && validDescriptor(selector.substring(start))
+                    && selector.substring(start).equals(method.desc);
+            List<String> aliases = new ArrayList<>();
+            if (nativeOverwrite) aliases.add(selector.substring(0, start));
+            if (selector.isEmpty()) {
+                nativeOverwrite = true;
+                for (String name : targetNames) {
+                    try {
+                        byte[] bytes = resources.read(name);
+                        List<Diagnostic> pending = new ArrayList<>();
+                        MethodNode original = bytes == null ? null : findTarget(ClassFiles.read(bytes), method, annotation,
+                                new MethodKey(mixin.name, method.name, method.desc), pending);
+                        if (original == null || !original.desc.equals(method.desc)) {
+                            nativeOverwrite = false;
+                            break;
+                        }
+                        aliases.add(original.name);
+                    } catch (java.io.IOException | RuntimeException unavailable) {
+                        nativeOverwrite = false;
+                        break;
+                    }
+                }
+            }
+            if (nativeOverwrite) {
+                for (String alias : aliases) if (!alias.equals(method.name)) addAlias(annotation, alias);
+                annotation.desc = MixinAnnotations.OVERWRITE;
+                removeValue(annotation, "method");
+                removeValue(annotation, "parameters");
+            }
+        }
     }
 
     private MethodNode findTarget(ClassNode target, MethodNode implementation, AnnotationNode annotation,

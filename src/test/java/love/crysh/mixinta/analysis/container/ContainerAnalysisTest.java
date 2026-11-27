@@ -17,6 +17,65 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class ContainerAnalysisTest {
     @Test
+    void retainsEffectsOfCustomCollectionImplementationsWithUnmodeledReceivers() {
+        Map<String, ClassNode> nodes = new LinkedHashMap<>();
+        BytecodeFixtures.compile(Map.of("sample.Subject", """
+                package sample;
+                public class Subject {
+                    public static Object saved;
+                    public static void use() {
+                        java.util.Queue<Object> queue = new java.util.ArrayDeque<>();
+                        java.util.Collection<Object> receiver = new Custom();
+                        receiver.contains(queue);
+                    }
+                    public static class Custom extends java.util.AbstractSet<Object> {
+                        public boolean contains(Object value) { saved = value; return true; }
+                        public int size() { return 0; }
+                        public java.util.Iterator<Object> iterator() { return java.util.Collections.emptyIterator(); }
+                    }
+                }
+                """)).forEach((name, bytes) -> nodes.put(name, ClassFiles.read(bytes)));
+        var hierarchy = new ClassHierarchy(nodes, getClass().getClassLoader());
+        var analysis = ContainerAnalysis.analyzeAll(nodes, Set.of(), hierarchy, List.of(List.<ContainerContract>of()))
+                .get(Set.of());
+        assertTrue(analysis.failures().isEmpty());
+        assertTrue(analysis.effects().accesses().stream().anyMatch(access ->
+                access.kind() == ContainerEffects.Kind.FIELD_STORE
+                        && access.storages().stream().anyMatch(storage -> storage.method().owner().equals("sample/Subject"))));
+    }
+
+    @Test
+    void keepsModeledMapViewsOutOfUnrelatedVirtualImplementations() {
+        Map<String, ClassNode> nodes = new LinkedHashMap<>();
+        BytecodeFixtures.compile(Map.of("sample.Subject", """
+                package sample;
+                public class Subject {
+                    public static Object read() {
+                        java.util.Map<Object, Object> map = new java.util.LinkedHashMap<>();
+                        map.put(1L, 12L);
+                        java.util.Collection<Object> values = map.values();
+                        values.contains(3L);
+                        values.remove(3L);
+                        return values.iterator().next();
+                    }
+                    public static class Unrelated extends java.util.AbstractSet<Object> {
+                        private Object[] data;
+                        public boolean contains(Object value) { return data.length != 0; }
+                        public int size() { return 0; }
+                        public java.util.Iterator<Object> iterator() { return java.util.Collections.emptyIterator(); }
+                    }
+                }
+                """)).forEach((name, bytes) -> nodes.put(name, ClassFiles.read(bytes)));
+        var hierarchy = new ClassHierarchy(nodes, getClass().getClassLoader());
+        var analysis = ContainerAnalysis.analyzeAll(nodes, Set.of(), hierarchy, List.of(List.<ContainerContract>of()))
+                .get(Set.of());
+        assertTrue(analysis.failures().isEmpty());
+        assertTrue(analysis.effects().accesses().stream().noneMatch(access ->
+                access.point().method().owner().equals("sample/Subject$Unrelated")
+                        && access.storages().stream().anyMatch(storage -> storage.method().owner().equals("sample/Subject"))));
+    }
+
+    @Test
     void sharesSourceFramesButIsolatesContractDependentAllocationsAndAliases() {
         Map<String, byte[]> bytes = BytecodeFixtures.compile(Map.of("sample.Subject", """
                 package sample;

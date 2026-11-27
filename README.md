@@ -97,24 +97,20 @@ static int process(BlockPos position) {
 
 自定义容器可在迁移规则类上重复声明 `@ContainerRule`。声明需要使用 owner、方法名和完整 JVM 描述符，并准确描述元素通道及操作，例如 `ALLOCATE`、`WRITE`、`READ`、`READ_REMOVE`、`CLEAR` 和 `VIEW`。容器规则是对实际实现行为的承诺，MixinTA 会检查规则结构，但由规则编写者保证行为契约成立。
 
-分析范围由调用方提供的固定类集合决定。字段、数组、反射、动态生成类、未知来源、容器逃逸、未建模操作和不完整派发信息可能导致未解决约束。Stream、Spliterator 和 bulk 操作等摘要仍有扩展空间。诊断通过 `TypedOverwriteException` 汇总，可用 `-Dmixinta.diagnostics=verbose` 查看更完整的传播路径和候选规则。
+Fabric 运行时从当前 Knot 的实际类来源自动建立分析范围，独立使用核心 API 时由调用方提供固定类集合。字段、数组、反射、动态生成类、未知来源、容器逃逸、未建模操作和不完整派发信息可能导致未解决约束。Stream、Spliterator 和 bulk 操作等摘要仍有扩展空间。诊断通过 `TypedOverwriteException` 汇总，可用 `-Dmixinta.diagnostics=verbose` 查看更完整的传播路径和候选规则。
 
 ## Fabric 模组接入
 
-将 MixinTA 作为 Fabric 模组依赖，并在模组 JAR 中通过 JiJ 嵌入。参与分析的类与声明 Mixin 类通过 `fabric.mod.json` 的 `custom.mixinta` 登记：
+将 MixinTA 作为 Fabric 模组依赖，并按需在模组 JAR 中通过 JiJ 嵌入。在 `fabric.mod.json` 声明普通 Mixin 配置。
 
 ```json
 {
-  "custom": {
-    "mixinta": {
-      "classes": ["example.Main", "example.Main$BlockPos"],
-      "mixins": ["example.mixin.MainMixin"]
-    }
-  }
+  "depends": { "mixinta": "*" },
+  "mixins": ["example.mixins.json"]
 }
 ```
 
-MixinTA 通过自身的 language adapter 安装早期转换设施。Mixin 配置按常规方式编写：
+MixinTA 通过自身的 language adapter 安装早期发现和转换设施。`example.mixins.json` 按常规方式编写。
 
 ```json
 {
@@ -125,7 +121,7 @@ MixinTA 通过自身的 language adapter 安装早期转换设施。Mixin 配置
 }
 ```
 
-完整分析由安全转换入口自动触发，MixinTA 的 preLaunch 入口负责主动完成和检查。使用方可以在普通模组入口直接使用登记的业务类：
+运行时从 Mixin 的实际准备过程发现声明，按最终生效映射确定目标，自动发现应用和模组中的调用方及规则类。环境列表和 plugin 的新增、筛选结果沿用 Mixin 流程。完整分析由安全转换入口自动触发，MixinTA 的 preLaunch 入口负责主动完成和检查。使用方可以在普通模组入口直接使用业务类。
 
 ```java
 public void onInitialize() {
@@ -135,7 +131,11 @@ public void onInitialize() {
 
 运行时从真实前置转换结果建立输入，取得完整的 Mixin 后快照，再分析并一次性发布转换结果，执行顺序为 `Fabric 前置处理 -> Mixin -> MixinTA -> 类定义`。已有 `prepare()`、`initialize()` 调用和 `TypedOverwritePlugin` 会检查并复用同一批次。
 
-当前运行时支持单个 Knot ClassLoader 的显式固定分析域，依赖 JVM 动态附加支持，MixinTA 需要从打包 JAR 加载。实际需要改写的类若已定义，或实际字节码与分析快照不一致，会形成启动诊断。发布后出现的旧描述符引用和新增 Mixin 配置也会受到检查。
+引用表示迁移默认使用按需分析。在完整输入上建立轻量引用索引，再为调用、字段、初始化及潜在派发关系的保守闭包建立数据流。可通过 `-Dmixinta.analysis=full` 使用完整方法分析，通过 `-Dmixinta.analysis=verify` 在同一份 Mixin 后快照上对照两种分析的诊断、修改集合和输出字节码。独立核心 API 默认使用完整分析。
+
+运行时的 FINE 日志记录来源读取、Fabric 前置处理、Mixin 应用、数据流、容器求解、表示求解、计划、输出验证和批次检查耗时，以及候选类、分析方法、缓存命中和修改类数量。无法读取或解析的参与候选会汇总为 `UNVERIFIABLE_ANALYSIS_INPUT`，附带类名、来源、失败阶段和原因。
+
+当前运行时支持单个 Knot ClassLoader 的启动可枚举来源，依赖 JVM 动态附加支持，MixinTA 需要从打包 JAR 加载。实际需要改写的类若已定义，或实际字节码与分析快照不一致，会形成启动诊断。发布后出现的旧描述符引用和新增 Mixin 配置也会受到检查。表示迁移批次发布后，会拒绝冻结输入之外新出现的业务类，以避免未经分析的共享存储访问。安装 MixinTA 会先连接发现设施，无生效 TA 声明时跳过分析，仅有等描述符覆盖时跳过全局迁移分析。
 
 ## 构建与验证
 
