@@ -5,9 +5,11 @@ import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.loader.impl.game.GameProvider;
 import net.fabricmc.loader.impl.game.patch.GameTransformer;
 import net.fabricmc.loader.impl.launch.FabricLauncher;
-import net.fabricmc.loader.impl.launch.FabricLauncherBase;
 import net.fabricmc.loader.impl.util.Arguments;
+import net.fabricmc.loader.impl.util.UrlConversionException;
+import net.fabricmc.loader.impl.util.UrlUtil;
 
+import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
 import java.lang.reflect.Method;
 import java.nio.file.Files;
@@ -16,16 +18,22 @@ import java.util.Collection;
 import java.util.Collections;
 import java.util.List;
 import java.util.Set;
+import java.util.jar.JarFile;
+import java.util.stream.Collectors;
 
 public final class ExpFabricProvider implements GameProvider {
     private static final String APP_MAIN = "love.crysh.exp.Main";
     private static final String DEFAULT_GAME_VERSION = "0.1.0-Snapshot";
+    private static final Set<BuiltinTransform> APPLICATION_TRANSFORMS = Set.of(
+            BuiltinTransform.STRIP_ENVIRONMENT, BuiltinTransform.CLASS_TWEAKS);
+    private static final Set<BuiltinTransform> MOD_TRANSFORMS = Set.of(BuiltinTransform.STRIP_ENVIRONMENT);
 
     private final Arguments arguments = new Arguments();
     private final GameTransformer transformer = new GameTransformer();
     private Path gameJar;
     private Path runDirectory;
     private String gameVersion = DEFAULT_GAME_VERSION;
+    private Set<String> applicationClasses = Set.of();
 
     @Override
     public String getGameId() {
@@ -74,7 +82,7 @@ public final class ExpFabricProvider implements GameProvider {
 
     @Override
     public Set<BuiltinTransform> getBuiltinTransforms(String className) {
-        return Set.of();
+        return applicationClasses.contains(className) ? APPLICATION_TRANSFORMS : MOD_TRANSFORMS;
     }
 
     @Override
@@ -87,6 +95,16 @@ public final class ExpFabricProvider implements GameProvider {
         arguments.parse(args);
         if (!Files.isRegularFile(gameJar)) {
             return false;
+        }
+        try (JarFile jar = new JarFile(gameJar.toFile(), false, JarFile.OPEN_READ, Runtime.version())) {
+            applicationClasses = jar.versionedStream()
+                    .map(entry -> entry.getName())
+                    .filter(name -> name.endsWith(".class") && !name.startsWith("META-INF/")
+                            && !name.equals("module-info.class"))
+                    .map(name -> name.substring(0, name.length() - 6).replace('/', '.'))
+                    .collect(Collectors.toUnmodifiableSet());
+        } catch (IOException failure) {
+            throw new RuntimeException("无法读取 Exp 应用类索引: " + gameJar, failure);
         }
         try {
             Files.createDirectories(runDirectory.resolve("mods"));
@@ -106,7 +124,31 @@ public final class ExpFabricProvider implements GameProvider {
 
     @Override
     public void unlockClassPath(FabricLauncher launcher) {
-        FabricLauncherBase.getLauncher().addToClassPath(gameJar);
+        launcher.addToClassPath(gameJar);
+        verifyApplicationSources(launcher.getTargetClassLoader());
+    }
+
+    /** 类名决定转换策略，同名资源的来源冲突会使索引与实际加载输入不一致。 */
+    private void verifyApplicationSources(ClassLoader loader) {
+        try {
+            Path expected = gameJar.toRealPath();
+            for (String name : applicationClasses) {
+                String resourceName = name.replace('.', '/') + ".class";
+                var resources = loader.getResources(resourceName);
+                if (!resources.hasMoreElements()) {
+                    throw new IllegalStateException("Exp 应用类不可见: " + name);
+                }
+                while (resources.hasMoreElements()) {
+                    Path actual = UrlUtil.getCodeSource(resources.nextElement(), resourceName).toRealPath();
+                    if (!expected.equals(actual)) {
+                        throw new IllegalStateException("Exp 应用类来源冲突: " + name
+                                + ", expected=" + expected + ", actual=" + actual);
+                    }
+                }
+            }
+        } catch (IOException | UrlConversionException failure) {
+            throw new RuntimeException("无法核对 Exp 应用类来源", failure);
+        }
     }
 
     @Override
