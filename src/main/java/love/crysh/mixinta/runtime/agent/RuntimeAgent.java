@@ -16,6 +16,8 @@ import org.objectweb.asm.tree.VarInsnNode;
 import java.lang.instrument.ClassFileTransformer;
 import java.lang.instrument.Instrumentation;
 import java.security.ProtectionDomain;
+import java.util.Arrays;
+import java.util.Objects;
 import java.util.function.BiFunction;
 import java.util.function.UnaryOperator;
 
@@ -26,62 +28,80 @@ import java.util.function.UnaryOperator;
 public final class RuntimeAgent implements ClassFileTransformer {
     private static final String MIXIN_INFO = "org/spongepowered/asm/mixin/transformer/MixinInfo";
     private static final String MIXIN_TRANSFORMER = "org/spongepowered/asm/mixin/transformer/MixinTransformer";
-    private static volatile UnaryOperator<Object> preparation;
-    private static volatile BiFunction<ClassLoader, Object[], byte[]> publication;
-    private static volatile BiFunction<String, byte[], byte[]> cache;
+    private record Callbacks(UnaryOperator<Object> preparation,
+            BiFunction<ClassLoader, Object[], byte[]> publication, BiFunction<Object[], byte[], byte[]> cache) { }
+
+    private static volatile Callbacks callbacks;
     private static volatile boolean hooked;
     private static volatile boolean cacheHooked;
     private static Instrumentation instrumentation;
+    private static Throwable installationFailure;
 
     private RuntimeAgent() {
     }
 
-    public static void agentmain(String arguments, Instrumentation instrumentation) throws Exception {
-        RuntimeAgent.instrumentation = instrumentation;
-        if (!instrumentation.isRetransformClassesSupported()) {
-            throw new IllegalStateException("MixinTA requires class retransformation");
+    public static synchronized void agentmain(String arguments, Instrumentation instrumentation) throws Exception {
+        if (RuntimeAgent.instrumentation != null) {
+            if (installationFailure != null) throw new IllegalStateException("MixinTA agent installation failed", installationFailure);
+            return;
         }
-        RuntimeAgent agent = new RuntimeAgent();
-        instrumentation.addTransformer(agent, true);
-        Class<?> mixinInfo = Class.forName(MIXIN_INFO.replace('/', '.'), false, RuntimeAgent.class.getClassLoader());
-        instrumentation.retransformClasses(mixinInfo);
-        instrumentation.retransformClasses(Class.forName(MIXIN_TRANSFORMER.replace('/', '.'), false,
-                RuntimeAgent.class.getClassLoader()));
-        if (!hooked || !cacheHooked) {
-            throw new IllegalStateException("Unsupported MixinInfo or MixinTransformer implementation");
+        RuntimeAgent.instrumentation = instrumentation;
+        try {
+            if (!instrumentation.isRetransformClassesSupported()) {
+                throw new IllegalStateException("MixinTA requires class retransformation");
+            }
+            RuntimeAgent agent = new RuntimeAgent();
+            instrumentation.addTransformer(agent, true);
+            Class<?> mixinInfo = Class.forName(MIXIN_INFO.replace('/', '.'), false, RuntimeAgent.class.getClassLoader());
+            instrumentation.retransformClasses(mixinInfo);
+            instrumentation.retransformClasses(Class.forName(MIXIN_TRANSFORMER.replace('/', '.'), false,
+                    RuntimeAgent.class.getClassLoader()));
+            if (!hooked || !cacheHooked) {
+                throw new IllegalStateException("Unsupported MixinInfo or MixinTransformer implementation");
+            }
+        } catch (Exception | Error failure) {
+            installationFailure = failure;
+            throw failure;
         }
     }
 
     public static void connect(UnaryOperator<Object> prepare, BiFunction<ClassLoader, Object[], byte[]> publish,
-            BiFunction<String, byte[], byte[]> cached) {
-        if (!hooked || !cacheHooked || preparation != null) {
-            throw new IllegalStateException("MixinTA agent is unavailable or already connected");
+            BiFunction<Object[], byte[], byte[]> cached) {
+        Callbacks installed = new Callbacks(Objects.requireNonNull(prepare), Objects.requireNonNull(publish),
+                Objects.requireNonNull(cached));
+        synchronized (RuntimeAgent.class) {
+            if (!hooked || !cacheHooked || callbacks != null) {
+                throw new IllegalStateException("MixinTA agent is unavailable or already connected");
+            }
+            callbacks = installed;
         }
-        preparation = prepare;
-        publication = publish;
-        cache = cached;
         for (Class<?> loaded : instrumentation.getAllLoadedClasses()) {
-            publish.apply(loaded.getClassLoader(), new Object[] {loaded.getName().replace('.', '/'), null});
+            publish.apply(loaded.getClassLoader(), new Object[] {loaded.getName().replace('.', '/'), null, loaded});
         }
+    }
+
+    public static Class<?>[] loadedClasses(ClassLoader loader) {
+        return Arrays.stream(instrumentation.getAllLoadedClasses())
+                .filter(type -> type.getClassLoader() == loader && !type.isArray()).toArray(Class<?>[]::new);
     }
 
     public static Object prepare(Object node) {
-        UnaryOperator<Object> callback = preparation;
-        return callback == null ? node : callback.apply(node);
+        Callbacks current = callbacks;
+        return current == null ? node : current.preparation().apply(node);
     }
 
-    public static byte[] cached(String name, byte[] bytes) {
-        BiFunction<String, byte[], byte[]> callback = cache;
-        return callback == null ? null : callback.apply(name, bytes);
+    public static byte[] cached(Object transformer, String name, byte[] bytes) {
+        Callbacks current = callbacks;
+        return current == null ? null : current.cache().apply(new Object[] {transformer, name}, bytes);
     }
 
     @Override
     public byte[] transform(ClassLoader loader, String name, Class<?> redefined,
             ProtectionDomain domain, byte[] bytes) {
-        if (MIXIN_TRANSFORMER.equals(name)) {
+        if (loader == RuntimeAgent.class.getClassLoader() && MIXIN_TRANSFORMER.equals(name)) {
             return hookCache(bytes);
         }
-        if (MIXIN_INFO.equals(name)) {
+        if (loader == RuntimeAgent.class.getClassLoader() && MIXIN_INFO.equals(name)) {
             ClassNode node = new ClassNode();
             new ClassReader(bytes).accept(node, 0);
             int exits = 0;
@@ -108,12 +128,12 @@ public final class RuntimeAgent implements ClassFileTransformer {
             hooked = true;
             return writer.toByteArray();
         }
-        BiFunction<ClassLoader, Object[], byte[]> callback = publication;
-        if (callback == null || redefined != null) {
+        Callbacks current = callbacks;
+        if (current == null || redefined != null) {
             return null;
         }
         try {
-            return callback.apply(loader, new Object[] {name, bytes});
+            return current.publication().apply(loader, new Object[] {name, bytes});
         } catch (Throwable failure) {
             // JVM 会忽略 transformer 抛出的异常。非法 class 数据确保 defineClass 失败。
             failure.printStackTrace(System.err);
@@ -130,10 +150,11 @@ public final class RuntimeAgent implements ClassFileTransformer {
                     && method.desc.equals("(Ljava/lang/String;Ljava/lang/String;[B)[B")) {
                 LabelNode original = new LabelNode();
                 InsnList entry = new InsnList();
+                entry.add(new VarInsnNode(Opcodes.ALOAD, 0));
                 entry.add(new VarInsnNode(Opcodes.ALOAD, 2));
                 entry.add(new VarInsnNode(Opcodes.ALOAD, 3));
                 entry.add(new MethodInsnNode(Opcodes.INVOKESTATIC, RuntimeAgent.class.getName().replace('.', '/'),
-                        "cached", "(Ljava/lang/String;[B)[B", false));
+                        "cached", "(Ljava/lang/Object;Ljava/lang/String;[B)[B", false));
                 entry.add(new InsnNode(Opcodes.DUP));
                 entry.add(new JumpInsnNode(Opcodes.IFNULL, original));
                 entry.add(new InsnNode(Opcodes.ARETURN));
@@ -141,7 +162,7 @@ public final class RuntimeAgent implements ClassFileTransformer {
                 entry.add(new FrameNode(Opcodes.F_SAME1, 0, null, 1, new Object[] {"[B"}));
                 entry.add(new InsnNode(Opcodes.POP));
                 method.instructions.insert(entry);
-                method.maxStack = Math.max(method.maxStack, 2);
+                method.maxStack = Math.max(method.maxStack, 3);
                 hooks++;
             }
         }

@@ -8,7 +8,13 @@
     ],
     "license": "MIT",
     "environment": "*",
+    "languageAdapters": {
+        "mixinta_bootstrap": "love.crysh.mixinta.runtime.RuntimeBootstrapAdapter"
+    },
     "entrypoints": {
+        "preLaunch": [
+            "love.crysh.mixinta.runtime.RuntimePreLaunch"
+        ],
         "main": [
             "love.crysh.mixinta.MixinTypeAnalysis"
         ]

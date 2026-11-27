@@ -7,7 +7,7 @@ import org.spongepowered.asm.mixin.extensibility.IMixinInfo;
 import java.util.List;
 import java.util.Set;
 
-/** 在配置准备之前安装注解处理钩子。 */
+/** 为显式调用方提供声明准备检查，重复调用复用同一批次。 */
 public final class TypedOverwritePlugin implements IMixinConfigPlugin {
     @Override
     public void onLoad(String mixinPackage) {

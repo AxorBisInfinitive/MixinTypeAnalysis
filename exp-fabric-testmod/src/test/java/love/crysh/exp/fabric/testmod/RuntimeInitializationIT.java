@@ -2,6 +2,16 @@ package love.crysh.exp.fabric.testmod;
 
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
+import org.objectweb.asm.ClassReader;
+import org.objectweb.asm.ClassWriter;
+import org.objectweb.asm.ConstantDynamic;
+import org.objectweb.asm.Handle;
+import org.objectweb.asm.Opcodes;
+import org.objectweb.asm.tree.ClassNode;
+import org.objectweb.asm.tree.InsnNode;
+import org.objectweb.asm.tree.LdcInsnNode;
 
 import javax.tools.ToolProvider;
 import java.io.File;
@@ -22,7 +32,7 @@ import java.util.stream.Collectors;
 
 import static org.junit.jupiter.api.Assertions.*;
 
-/** 子 JVM 使用测试引导原型、正式 Agent 和正式分析器验证启动边界。 */
+/** 独立子 JVM 使用正式运行时和测试侧观察器验证启动边界。 */
 class RuntimeInitializationIT {
     private static final Path PROJECT = Path.of(System.getProperty("project.directory")).toAbsolutePath();
     private static final String PROBE = "love.crysh.exp.fabric.testmod.initialization.";
@@ -43,11 +53,38 @@ class RuntimeInitializationIT {
     }
 
     @Test
-    void exposesConfigurationSelectionTriggeredByUnpreparedSupportClasses() throws Exception {
-        Result result = launch("support-not-preloaded", "", Map.of(), List.of(), false,
-                List.of("-Dprobe.skipSupportPreload=true"));
-        result.failureBeforeBusiness("contains non-private static method div(DD)I");
-        result.ordered("PLUGIN_LOAD", "DECLARATIONS_PREPARED");
+    void preparesDeclarationsBeforeConfigurationSelection() throws Exception {
+        Result result = launch("support-preloaded", "", Map.of(), List.of(), false, List.of());
+        result.success();
+        result.ordered("DECLARATIONS_PREPARED", "PLUGIN_LOAD state=CONFIGURING", "BATCH_READY");
+    }
+
+    @Test
+    void remainsInactiveWithoutMigrationDeclarations() throws Exception {
+        Result result = launch("inactive", "", Map.of(), List.of(), false, List.of("-Dprobe.noDeclarations=true"));
+        result.success();
+        result.contains("INACTIVE_RUNTIME_VERIFIED", "RESULT=2");
+        assertFalse(result.log().contains("A Java agent has been loaded dynamically"), result.log());
+    }
+
+    @Test
+    void rejectsMixinConfigurationsRegisteredAfterPublication() throws Exception {
+        Result result = launch("late-configuration", """
+                if (Boolean.getBoolean("probe.lateConfig")) {
+                    org.spongepowered.asm.mixin.Mixins.addConfiguration("late.mixins.json");
+                    Class.forName("fixture.late.Empty", false, Main.class.getClassLoader());
+                }
+                """, Map.of("fixture.late.Empty", "package fixture.late; public class Empty {}"),
+                List.of(), false, List.of("-Dprobe.lateConfig=true"));
+        result.failure("MIXIN_CONFIGURATION_CHANGED", "outputsPublished=true");
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"concurrentConfig", "concurrentPlugin"})
+    void rejectsCrossThreadParticipantRequestsDuringMixinWork(String option) throws Exception {
+        Result result = launch(option, "", Map.of(), List.of(), false, List.of("-Dprobe." + option + "=true"));
+        result.failureBeforeBusiness("CONCURRENT_PREPARATION", "PLUGIN_CONCURRENT_CAUGHT=");
+        assertFalse(result.log().contains("BATCH_READY"), result.log());
     }
 
     @Test
@@ -69,7 +106,7 @@ class RuntimeInitializationIT {
     @Test
     void rejectsPluginReentryAndRetainsThePluginCallChain() throws Exception {
         Result result = launch("plugin-reentry", "", Map.of(), List.of(), false, List.of("-Dprobe.reentrant=true"));
-        result.failureBeforeBusiness("REENTRANT_DEFINITION fixture/business/Subject state=PREPARING",
+        result.failureBeforeBusiness("REENTRANT_DEFINITION fixture/business/Subject phase=CONFIGURING",
                 "InitializationProbePlugin.onLoad", "PLUGIN_CAUGHT");
         assertFalse(result.log().contains("BATCH_READY"), result.log());
     }
@@ -190,7 +227,7 @@ class RuntimeInitializationIT {
                 """;
         Result result = launch("concurrent", "", Map.of("fixture.entry.ConcurrentEntry", entry),
                 List.of("fixture.entry.ConcurrentEntry"), false,
-                List.of("-Dprobe.deferAnalysis=true", "-Dprobe.pauseAnalysis=true"));
+                List.of("-Dprobe.concurrent=true"));
         result.success();
         result.contains("WAIT_FOR_BATCH=", "CONCURRENT_LOADS_COMPLETED", "COUNTS=1/1/1 ANALYSES=1");
     }
@@ -199,6 +236,9 @@ class RuntimeInitializationIT {
     void reusesTheSameMixinAndExtensionResultsDuringRealClassDefinition() throws Exception {
         Result result = launch("single-application", """
                 for (int count = 0; count < 3; count++) {
+                    love.crysh.mixinta.runtime.TypedOverwriteRuntime.bootstrap();
+                    love.crysh.mixinta.runtime.TypedOverwriteRuntime.prepare();
+                    love.crysh.mixinta.runtime.TypedOverwriteRuntime.initialize();
                     Class.forName("fixture.business.Subject", false, Main.class.getClassLoader());
                     Class.forName("fixture.business.Caller", false, Main.class.getClassLoader());
                 }
@@ -215,6 +255,35 @@ class RuntimeInitializationIT {
                 """, Map.of(), List.of(), true, List.of(), Set.of(SUBJECT));
         result.success();
         result.contains("PREPROCESSING_VERIFIED widened=true", "RESULT=25", "TARGET_FROM_MOD=false");
+    }
+
+    @Test
+    void usesPreprocessedMetadataForHierarchyDependenciesOutsideTheCandidateDomain() throws Exception {
+        Map<String, String> sources = Map.of(
+                "fixture.external.Parent", "package fixture.external; public class Parent { private int div(int a,int b){return a/b;} }",
+                SUBJECT, """
+                        package fixture.business;
+                        public final class Subject extends fixture.external.Parent {
+                            public int div(int a,int b){return a/b;}
+                            private static int helper(){return 7;}
+                        }
+                        """,
+                CALLER, "package fixture.business; public class Caller {public static int run(){return new Subject().div(10,4);}}",
+                "fixture.mixin.SubjectMixin", """
+                        package fixture.mixin;
+                        @org.spongepowered.asm.mixin.Mixin(targets="fixture.business.Subject", remap=false)
+                        public class SubjectMixin {
+                            @love.crysh.mixinta.anno.TypedOverwrite(method="div(II)I")
+                            public int div(double a,double b){return (int)(a/b*10);}
+                        }
+                        """);
+        Result baseline = launch("hierarchy-input-baseline", "", sources, List.of(), false, List.of(),
+                Set.of(SUBJECT, "fixture.external.Parent"));
+        baseline.success();
+        baseline.contains("RESULT=25");
+        Result result = launch("hierarchy-input-stage", "", sources, List.of(), true, List.of(),
+                Set.of(SUBJECT, "fixture.external.Parent"));
+        result.failureBeforeBusiness("OVERRIDE_CHAIN_NOT_IMPLEMENTED");
     }
 
     @Test
@@ -330,26 +399,43 @@ class RuntimeInitializationIT {
         assertFalse(result.log().contains("NoSuchMethodError"), result.log());
     }
 
-    @Test
-    void retainsAnAnalysisFailureAndPublishesNoOutputs() throws Exception {
-        String entry = """
-                package fixture.entry;
-                public class FailureEntry implements net.fabricmc.loader.api.entrypoint.PreLaunchEntrypoint {
-                    public void onPreLaunch() {
-                        try {
-                            Class.forName("fixture.business.Subject", false, getClass().getClassLoader());
-                        } catch (Throwable expected) {
-                            love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.verifyPersistentFailure(false);
-                            throw new RuntimeException("EXPECTED_ANALYSIS_FAILURE", expected);
-                        }
-                        throw new AssertionError("Analysis failure ignored");
+    @ParameterizedTest
+    @ValueSource(strings = {"handle", "lambda", "condy", "inherited"})
+    void rejectsLateReferencesInBootstrapConstantsAndInheritedOwners(String kind) throws Exception {
+        Map<String, String> helpers = new LinkedHashMap<>();
+        String body = kind.equals("lambda")
+                ? "java.util.function.IntBinaryOperator operation = fixture.business.Subject::div; return operation.applyAsInt(10,4);"
+                : "return 0;";
+        if (kind.equals("inherited")) {
+            helpers.put(SUBJECT, "package fixture.business; public class Subject { public static int div(int a,int b){return a/b;} }");
+            helpers.put("fixture.late.Child", "package fixture.late; public class Child extends fixture.business.Subject {}");
+            body = "return Child.div(10,4);";
+        }
+        helpers.put("fixture.late.LateCaller", "package fixture.late; public class LateCaller { public static int call(){" + body + "} }");
+        Result baseline = launch("late-baseline-" + kind,
+                "System.out.println(\"LATE_BASELINE=\" + fixture.late.LateCaller.call());", helpers, List.of(), false,
+                List.of("-Dprobe.lateKind=" + kind, "-Dprobe.noDeclarations=true"));
+        baseline.success();
+        baseline.contains("LATE_BASELINE=" + (kind.equals("handle") || kind.equals("condy") ? 0 : 2));
+        Result result = launch("late-" + kind, """
+                if (System.getProperty("probe.lateKind") != null) {
+                    try {
+                        Class.forName("fixture.late.LateCaller", false, Main.class.getClassLoader());
+                        throw new AssertionError("Late reference unexpectedly defined");
+                    } catch (ClassFormatError expected) {
+                        love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.verifyPersistentFailure(true);
+                        throw expected;
                     }
                 }
-                """;
-        Result result = launch("retained-failure", "", Map.of("fixture.entry.FailureEntry", entry),
-                List.of("fixture.entry.FailureEntry"), false,
-                List.of("-Dprobe.deferAnalysis=true", "-Dprobe.changeOriginal=true"));
-        result.failureBeforeBusiness("TARGET_CHANGED_AFTER_PREPARATION", "EXPECTED_ANALYSIS_FAILURE",
+                """, helpers, List.of(), false, List.of("-Dprobe.lateKind=" + kind));
+        result.failure("LATE_OLD_DESCRIPTOR fixture/late/LateCaller.call", "FAILURE_RETAINED OUTPUTS_PUBLISHED");
+    }
+
+    @Test
+    void retainsAnAnalysisFailureAndPublishesNoOutputs() throws Exception {
+        Result result = launch("retained-failure", "", Map.of(), List.of(), false,
+                List.of("-Dprobe.changeOriginal=true", "-Dprobe.verifyFailure=true"));
+        result.failureBeforeBusiness("TARGET_CHANGED_AFTER_PREPARATION",
                 "FAILURE_RETAINED OUTPUTS_ABSENT");
     }
 
@@ -435,6 +521,30 @@ class RuntimeInitializationIT {
         for (var entry : classEntries(PROJECT.resolve("target/test-classes")).entrySet()) {
             if (entry.getKey().startsWith(PROBE.replace('.', '/'))) modEntries.put(entry.getKey(), entry.getValue());
         }
+        if (options.contains("-Dprobe.lateKind=handle") || options.contains("-Dprobe.lateKind=condy")) {
+            ClassNode node = new ClassNode();
+            new ClassReader(modEntries.get("fixture/late/LateCaller.class")).accept(node, 0);
+            var method = node.methods.stream().filter(value -> value.name.equals("call")).findFirst().orElseThrow();
+            Handle target = new Handle(Opcodes.H_INVOKESTATIC, "fixture/business/Subject", "div", "(II)I", false);
+            Object constant = target;
+            if (options.contains("-Dprobe.lateKind=condy")) {
+                String prefix = "(Ljava/lang/invoke/MethodHandles$Lookup;Ljava/lang/String;Ljava/lang/Class;";
+                Handle cast = new Handle(Opcodes.H_INVOKESTATIC, "java/lang/invoke/ConstantBootstraps", "explicitCast",
+                        prefix + "Ljava/lang/Object;)Ljava/lang/Object;", false);
+                Handle invoke = new Handle(Opcodes.H_INVOKESTATIC, "java/lang/invoke/ConstantBootstraps", "invoke",
+                        prefix + "Ljava/lang/invoke/MethodHandle;[Ljava/lang/Object;)Ljava/lang/Object;", false);
+                var inner = new ConstantDynamic("operation", "Ljava/lang/invoke/MethodHandle;", cast, target);
+                constant = new ConstantDynamic("value", "Ljava/lang/Integer;", invoke, inner, 10, 4);
+            }
+            method.instructions.clear();
+            method.instructions.add(new LdcInsnNode(constant));
+            method.instructions.add(new InsnNode(Opcodes.POP));
+            method.instructions.add(new InsnNode(Opcodes.ICONST_0));
+            method.instructions.add(new InsnNode(Opcodes.IRETURN));
+            ClassWriter writer = new ClassWriter(ClassWriter.COMPUTE_MAXS);
+            node.accept(writer);
+            modEntries.put("fixture/late/LateCaller.class", writer.toByteArray());
+        }
         String nested = "META-INF/jars/mixin-type-analysis-0.1.0-Snapshot.jar";
         try (JarFile packaged = new JarFile(PROJECT.resolve("target/exp-fabric-testmod-0.1.0-Snapshot.jar").toFile())) {
             try (var input = packaged.getInputStream(packaged.getJarEntry(nested))) {
@@ -449,10 +559,17 @@ class RuntimeInitializationIT {
                  "languageAdapters":{"initialization_probe":"%sInitializationProbeAdapter"},
                  "entrypoints":{"main":["fixture.entry.MainEntry"],"preLaunch":[%s]},
                  "mixins":["probe.mixins.json"],"depends":{"mixinta":"*"},"jars":[{"file":"%s"}],
-                 "custom":{"initializationProbe":{"classes":[%s],"mixins":["fixture.mixin.SubjectMixin"]}}%s}
+                 "custom":{"mixinta":{"classes":[%s],"mixins":["fixture.mixin.SubjectMixin"]}}%s}
                 """.formatted(PROBE, strings(preLaunch), nested, strings(domain),
                 classTweaker ? ",\"accessWidener\":\"fixture.accesswidener\"" : "");
+        if (options.contains("-Dprobe.noDeclarations=true")) {
+            metadata = metadata.replace("\"mixins\":[\"probe.mixins.json\"]", "\"mixins\":[]")
+                    .replace("\"classes\":[" + strings(domain) + "]", "\"classes\":[]")
+                    .replace("\"mixins\":[\"fixture.mixin.SubjectMixin\"]", "\"mixins\":[]");
+        }
         modEntries.put("fabric.mod.json", metadata.getBytes(StandardCharsets.UTF_8));
+        modEntries.put("late.mixins.json", "{\"required\":true,\"package\":\"fixture.late.mixin\",\"mixins\":[]}"
+                .getBytes(StandardCharsets.UTF_8));
         modEntries.put("probe.mixins.json", ("""
                 {"required":true,"package":"fixture.mixin","compatibilityLevel":"JAVA_25",
                  "plugin":"%sInitializationProbePlugin","mixins":["SubjectMixin"]}
@@ -464,6 +581,9 @@ class RuntimeInitializationIT {
                     """;
             if (helpers.containsKey("love.crysh.exp.fabric.testmod.PrefixSubject")) {
                 rules += "accessible method love/crysh/exp/fabric/testmod/PrefixSubject helper ()I\n";
+            }
+            if (helpers.containsKey("fixture.external.Parent")) {
+                rules += "accessible method fixture/external/Parent div (II)I\n";
             }
             modEntries.put("fixture.accesswidener", rules.getBytes(StandardCharsets.UTF_8));
         }

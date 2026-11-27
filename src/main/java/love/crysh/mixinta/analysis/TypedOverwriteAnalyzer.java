@@ -1,6 +1,7 @@
 package love.crysh.mixinta.analysis;
 
 import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.bytecode.ClassByteSource;
 import love.crysh.mixinta.bytecode.ClassHierarchy;
 import love.crysh.mixinta.bytecode.PrimitiveConversions;
 import love.crysh.mixinta.diagnostic.Diagnostic;
@@ -25,13 +26,17 @@ import java.util.Set;
  * originals 必须是 Mixin 应用前的快照，mixinClasses 按内部类名索引。
  */
 public final class TypedOverwriteAnalyzer {
-    private final ClassLoader resources;
+    private final ClassByteSource resources;
 
     public TypedOverwriteAnalyzer() {
         this(TypedOverwriteAnalyzer.class.getClassLoader());
     }
 
     public TypedOverwriteAnalyzer(ClassLoader resources) {
+        this(ClassByteSource.from(resources));
+    }
+
+    public TypedOverwriteAnalyzer(ClassByteSource resources) {
         this.resources = resources;
     }
 

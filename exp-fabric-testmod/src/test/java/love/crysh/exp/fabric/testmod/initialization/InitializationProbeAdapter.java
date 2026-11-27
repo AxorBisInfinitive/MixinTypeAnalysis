@@ -4,7 +4,7 @@ import net.fabricmc.loader.api.LanguageAdapter;
 import net.fabricmc.loader.api.LanguageAdapterException;
 import net.fabricmc.loader.api.ModContainer;
 
-/** 在真实 Loader 的 adapter 实例化阶段启动验证原型。 */
+/** 在 adapter 阶段安装测试观察器，并按场景提前定义业务类。 */
 public final class InitializationProbeAdapter implements LanguageAdapter {
     public InitializationProbeAdapter() throws Exception {
         String early = System.getProperty("probe.earlyClass");

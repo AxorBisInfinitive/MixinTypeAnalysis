@@ -20,6 +20,7 @@ import org.objectweb.asm.tree.MethodNode;
 import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -35,6 +36,33 @@ class TypedOverwriteAnalyzerTest {
             @TypedOverwrite(method = "div(II)I")
             public static int div(double a, double b) { return (int) (a / b * 10); }
             """;
+
+    @Test
+    void exposesOnlyPlanWritesAndRetiredDescriptors() {
+        var fixture = BytecodeFixtures.fixture(ORIGINAL, TYPED, Map.of(
+                "sample.Caller", "package sample; public class Caller { public static int run(){ return Subject.div(10,4); } }",
+                "sample.ReadOnly", "package sample; public interface ReadOnly {}"));
+        var preparation = fixture.prepare();
+        var plan = preparation.analyze(BytecodeFixtures.mergeForCoreTest(fixture, preparation));
+        assertEquals(Set.of("sample/Subject", "sample/Caller"), plan.modifiedClasses());
+        assertEquals(Set.of(new love.crysh.mixinta.model.MethodKey("sample/Subject", "div", "(II)I")), plan.retiredMethods());
+        assertThrows(UnsupportedOperationException.class, () -> plan.modifiedClasses().clear());
+        var first = plan.apply();
+        var second = plan.apply();
+        first.forEach((name, bytes) -> assertArrayEquals(bytes, second.get(name)));
+    }
+
+    @Test
+    void nativeOverwriteDifferencesAreNotReportedAsTaWrites() {
+        var fixture = BytecodeFixtures.fixture(ORIGINAL,
+                "@TypedOverwrite public static int div(int a,int b){ return a-b; }");
+        var preparation = fixture.prepare();
+        var afterMixins = BytecodeFixtures.mergeForCoreTest(fixture, preparation);
+        var plan = preparation.analyze(afterMixins);
+        assertTrue(plan.modifiedClasses().isEmpty());
+        assertTrue(plan.retiredMethods().isEmpty());
+        afterMixins.forEach((name, bytes) -> assertArrayEquals(bytes, plan.apply().get(name)));
+    }
 
     @Test
     void convertsSameSignatureToNativeOverwriteWithoutChangingPriorityOrProtection() {

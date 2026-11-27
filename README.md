@@ -114,28 +114,28 @@ static int process(BlockPos position) {
 }
 ```
 
-Mixin 配置使用 MixinTA 提供的 config plugin：
+MixinTA 通过自身的 language adapter 安装早期转换设施。Mixin 配置按常规方式编写：
 
 ```json
 {
   "required": true,
   "package": "example.mixin",
-  "plugin": "love.crysh.mixinta.runtime.TypedOverwritePlugin",
   "compatibilityLevel": "JAVA_25",
   "mixins": ["MainMixin"]
 }
 ```
 
-模组入口需要在业务类首次加载前调用初始化：
+完整分析由安全转换入口自动触发，MixinTA 的 preLaunch 入口负责主动完成和检查。使用方可以在普通模组入口直接使用登记的业务类：
 
 ```java
 public void onInitialize() {
-    TypedOverwriteRuntime.initialize();
-    // 从这里开始使用参与分析的业务类
+    // 直接使用参与分析的业务类
 }
 ```
 
-运行时先取得 Mixin 处理后的固定类快照，再分析并一次性发布转换结果，执行顺序为 `Mixin → MixinTA → 类定义`。当前运行时依赖 JVM 动态附加支持，MixinTA 需要从打包 JAR 加载。被登记的类若在初始化前定义，或实际字节码与分析快照不一致，运行时会拒绝继续加载。
+运行时从真实前置转换结果建立输入，取得完整的 Mixin 后快照，再分析并一次性发布转换结果，执行顺序为 `Fabric 前置处理 -> Mixin -> MixinTA -> 类定义`。已有 `prepare()`、`initialize()` 调用和 `TypedOverwritePlugin` 会检查并复用同一批次。
+
+当前运行时支持单个 Knot ClassLoader 的显式固定分析域，依赖 JVM 动态附加支持，MixinTA 需要从打包 JAR 加载。实际需要改写的类若已定义，或实际字节码与分析快照不一致，会形成启动诊断。发布后出现的旧描述符引用和新增 Mixin 配置也会受到检查。
 
 ## 构建与验证
 

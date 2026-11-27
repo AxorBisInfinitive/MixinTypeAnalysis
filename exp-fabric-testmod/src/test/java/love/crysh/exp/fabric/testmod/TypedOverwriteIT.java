@@ -50,9 +50,12 @@ class TypedOverwriteIT {
                 Class.forName("%s", false, Main.class.getClassLoader());
                 System.out.println("RESULT=" + Caller.run());
                 Subject.class.getDeclaredMethod("div", double.class, double.class);
-                var outputField = love.crysh.mixinta.runtime.TypedOverwriteRuntime.class.getDeclaredField("outputs");
+                var outputField = love.crysh.mixinta.runtime.TypedOverwriteRuntime.class.getDeclaredField("result");
                 outputField.setAccessible(true);
-                var snapshots = (java.util.Map<String, byte[]>) outputField.get(null);
+                var snapshotHolder = outputField.get(null);
+                outputField = snapshotHolder.getClass().getDeclaredField("outputs");
+                outputField.setAccessible(true);
+                var snapshots = (java.util.Map<String, byte[]>) outputField.get(snapshotHolder);
                 var callerNode = new org.objectweb.asm.tree.ClassNode();
                 new org.objectweb.asm.ClassReader(snapshots.get("love/crysh/exp/Caller")).accept(callerNode, 0);
                 var run = callerNode.methods.stream().filter(method -> method.name.equals("run")).findFirst().orElseThrow();
@@ -187,9 +190,12 @@ class TypedOverwriteIT {
                         System.out.println("BUSINESS_EXECUTED");
                         System.out.println("RESULT=" + Caller.run());
                         Subject.class.getDeclaredMethod("lookup", BlockPos.class);
-                        var field = love.crysh.mixinta.runtime.TypedOverwriteRuntime.class.getDeclaredField("outputs");
+                        var field = love.crysh.mixinta.runtime.TypedOverwriteRuntime.class.getDeclaredField("result");
                         field.setAccessible(true);
-                        var outputs = (java.util.Map<String, byte[]>) field.get(null);
+                        var snapshotHolder = field.get(null);
+                        field = snapshotHolder.getClass().getDeclaredField("outputs");
+                        field.setAccessible(true);
+                        var outputs = (java.util.Map<String, byte[]>) field.get(snapshotHolder);
                         var node = new org.objectweb.asm.tree.ClassNode();
                         new org.objectweb.asm.ClassReader(outputs.get("love/crysh/exp/Subject")).accept(node, 0);
                         var run = node.methods.stream().filter(method -> method.name.equals("run")).findFirst().orElseThrow();
@@ -266,9 +272,12 @@ class TypedOverwriteIT {
                         if (other.Worker.class.getDeclaredMethod("legacy", java.util.Queue.class).getReturnType() != long.class) {
                             throw new AssertionError("Legacy descriptor changed");
                         }
-                        var field = love.crysh.mixinta.runtime.TypedOverwriteRuntime.class.getDeclaredField("outputs");
+                        var field = love.crysh.mixinta.runtime.TypedOverwriteRuntime.class.getDeclaredField("result");
                         field.setAccessible(true);
-                        var outputs = (java.util.Map<String, byte[]>) field.get(null);
+                        var snapshotHolder = field.get(null);
+                        field = snapshotHolder.getClass().getDeclaredField("outputs");
+                        field.setAccessible(true);
+                        var outputs = (java.util.Map<String, byte[]>) field.get(snapshotHolder);
                         var worker = new org.objectweb.asm.tree.ClassNode();
                         new org.objectweb.asm.ClassReader(outputs.get("other/Worker")).accept(worker, 0);
                         var bridges = new java.util.HashSet<String>();
@@ -348,9 +357,12 @@ class TypedOverwriteIT {
                         System.out.println("BUSINESS_EXECUTED");
                         if (other.Worker.run() != 12) throw new AssertionError();
                         Subject.class.getDeclaredMethod("lookup", BlockPos.class);
-                        var field = love.crysh.mixinta.runtime.TypedOverwriteRuntime.class.getDeclaredField("outputs");
+                        var field = love.crysh.mixinta.runtime.TypedOverwriteRuntime.class.getDeclaredField("result");
                         field.setAccessible(true);
-                        var outputs = (java.util.Map<String, byte[]>) field.get(null);
+                        var snapshotHolder = field.get(null);
+                        field = snapshotHolder.getClass().getDeclaredField("outputs");
+                        field.setAccessible(true);
+                        var outputs = (java.util.Map<String, byte[]>) field.get(snapshotHolder);
                         var worker = new org.objectweb.asm.tree.ClassNode();
                         new org.objectweb.asm.ClassReader(outputs.get("other/Worker")).accept(worker, 0);
                         int unboxing = 0;
@@ -444,9 +456,12 @@ class TypedOverwriteIT {
                         System.out.println("BUSINESS_EXECUTED");
                         if (other.Worker.run() != 12) throw new AssertionError();
                         Subject.class.getDeclaredMethod("lookup", BlockPos.class);
-                        var field = love.crysh.mixinta.runtime.TypedOverwriteRuntime.class.getDeclaredField("outputs");
+                        var field = love.crysh.mixinta.runtime.TypedOverwriteRuntime.class.getDeclaredField("result");
                         field.setAccessible(true);
-                        var outputs = (java.util.Map<String, byte[]>) field.get(null);
+                        var snapshotHolder = field.get(null);
+                        field = snapshotHolder.getClass().getDeclaredField("outputs");
+                        field.setAccessible(true);
+                        var outputs = (java.util.Map<String, byte[]>) field.get(snapshotHolder);
                         var worker = new org.objectweb.asm.tree.ClassNode();
                         new org.objectweb.asm.ClassReader(outputs.get("other/Worker")).accept(worker, 0);
                         for (var method : worker.methods) {
@@ -612,14 +627,14 @@ class TypedOverwriteIT {
     }
 
     @Test
-    void earlyDefinitionFailsEvenWhenClassFormatErrorIsCaught() throws Exception {
+    void ordinaryEntrypointsCanUseTargetsBeforeAnExplicitInitializeCall() throws Exception {
         String bootstrap = """
                 package fixture;
                 public class Bootstrap implements net.fabricmc.api.ModInitializer {
                     public void onInitialize() {
                         try {
                             Class.forName("love.crysh.exp.Subject", false, getClass().getClassLoader());
-                            throw new AssertionError("Early definition succeeded");
+                            System.out.println("AUTOMATIC_INITIALIZATION_READY");
                         } catch (ClassFormatError expected) {
                             System.out.println("EARLY_DEFINITION_REJECTED");
                         } catch (ClassNotFoundException failure) {
@@ -633,7 +648,9 @@ class TypedOverwriteIT {
                 Map.of("SubjectMixin", mixin("SubjectMixin", 1000,
                         TYPED + " public static int div(double a,double b){return 1;}")), List.of(),
                 Map.of("fixture.Bootstrap", bootstrap));
-        result.failure("MixinTA class loaded before batch initialization", "EARLY_DEFINITION_REJECTED");
+        result.success();
+        result.contains("AUTOMATIC_INITIALIZATION_READY");
+        assertFalse(result.log().contains("EARLY_DEFINITION_REJECTED"), result.log());
     }
 
     @Test
@@ -775,9 +792,12 @@ class TypedOverwriteIT {
                         System.out.println("SOURCES=" + sources);
                         Subject.class.getDeclaredMethod("first", BlockPos.class);
                         Subject.class.getDeclaredMethod("second", %s.class);
-                        var field = love.crysh.mixinta.runtime.TypedOverwriteRuntime.class.getDeclaredField("outputs");
+                        var field = love.crysh.mixinta.runtime.TypedOverwriteRuntime.class.getDeclaredField("result");
                         field.setAccessible(true);
-                        var snapshots = (java.util.Map<String, byte[]>)field.get(null);
+                        var snapshotHolder = field.get(null);
+                        field = snapshotHolder.getClass().getDeclaredField("outputs");
+                        field.setAccessible(true);
+                        var snapshots = (java.util.Map<String, byte[]>) field.get(snapshotHolder);
                         var node = new org.objectweb.asm.tree.ClassNode();
                         new org.objectweb.asm.ClassReader(snapshots.get("love/crysh/exp/Subject")).accept(node, 0);
                         var run = node.methods.stream().filter(method -> method.name.equals("run")).findFirst().orElseThrow();

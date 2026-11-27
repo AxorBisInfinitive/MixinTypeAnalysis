@@ -1,6 +1,7 @@
 package love.crysh.mixinta.analysis;
 
 import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.bytecode.ClassByteSource;
 import love.crysh.mixinta.bytecode.ClassHierarchy;
 import love.crysh.mixinta.bytecode.PrimitiveConversions;
 import love.crysh.mixinta.diagnostic.Diagnostic;
@@ -36,10 +37,10 @@ public final class TransformationPlan {
     private final List<Migration> migrations;
     private final List<CallSite> calls;
     private final List<RepresentationPlan> representationPlans;
-    private final ClassLoader resources;
+    private final ClassByteSource resources;
 
     TransformationPlan(Map<String, byte[]> classes, List<Migration> migrations, List<CallSite> calls,
-            List<RepresentationPlan> representationPlans, ClassLoader resources) {
+            List<RepresentationPlan> representationPlans, ClassByteSource resources) {
         this.classes = ClassFiles.snapshot(classes);
         this.migrations = List.copyOf(migrations);
         this.calls = List.copyOf(calls);
@@ -51,12 +52,30 @@ public final class TransformationPlan {
         return calls.size();
     }
 
+    /** 返回 TA 的实际写入类，包含调用方和生成规则转发方法的归属类。 */
+    public Set<String> modifiedClasses() {
+        Set<String> modified = new HashSet<>();
+        migrations.forEach(value -> modified.add(value.original().owner()));
+        calls.forEach(value -> modified.add(value.caller().owner()));
+        for (RepresentationPlan plan : representationPlans) {
+            plan.edits().forEach(value -> modified.add(value.location().method().owner()));
+            plan.arguments().forEach(value -> modified.add(value.location().method().owner()));
+            plan.bridges().forEach(value -> modified.add(value.method().owner()));
+        }
+        return Set.copyOf(modified);
+    }
+
+    /** 返回发布后失效的原方法标识，供域外引用检查使用。 */
+    public Set<MethodKey> retiredMethods() {
+        return migrations.stream().map(Migration::original).collect(java.util.stream.Collectors.toUnmodifiableSet());
+    }
+
     public Map<String, byte[]> apply() {
         List<Diagnostic> diagnostics = new ArrayList<>();
         Map<String, ClassNode> nodes = ClassFiles.readAll(classes, diagnostics);
         Map<MethodKey, AbstractInsnNode[]> originalInstructions = new HashMap<>();
         Map<MethodKey, Integer> temporaryBases = new HashMap<>();
-        Set<String> modified = new HashSet<>();
+        Set<String> modified = modifiedClasses();
         Map<MethodKey, AbstractInsnNode[]> representationInstructions = new HashMap<>();
         for (CallSite call : calls) {
             MethodKey key = call.caller();
@@ -77,15 +96,6 @@ public final class TransformationPlan {
         }
         for (RepresentationPlan plan : representationPlans) {
             plan.apply(nodes, representationInstructions);
-            for (RepresentationPlan.Edit edit : plan.edits()) {
-                modified.add(edit.location().method().owner());
-            }
-            for (RepresentationPlan.Argument argument : plan.arguments()) {
-                modified.add(argument.location().method().owner());
-            }
-            for (RepresentationPlan.Bridge bridge : plan.bridges()) {
-                modified.add(bridge.method().owner());
-            }
         }
         for (CallSite call : calls) {
             MethodKey key = call.caller();
@@ -96,7 +106,6 @@ public final class TransformationPlan {
             AbstractInsnNode[] instructions = originalInstructions.computeIfAbsent(key, ignored -> method.instructions.toArray());
             int temporaryBase = temporaryBases.computeIfAbsent(key, ignored -> method.maxLocals);
             adaptCall(method, (MethodInsnNode) instructions[call.instruction()], call.migration(), temporaryBase);
-            modified.add(key.owner());
         }
         for (Migration migration : migrations) {
             MethodKey original = migration.original();
@@ -106,7 +115,6 @@ public final class TransformationPlan {
             MethodNode replacement = ClassFiles.findMethod(owner, implementation.name(), implementation.descriptor());
             replacement.access = migration.access();
             replacement.visibleAnnotations.removeIf(annotation -> annotation.desc.equals(ClassFiles.TYPED_OVERWRITE));
-            modified.add(owner.name);
         }
 
         ClassHierarchy hierarchy = new ClassHierarchy(nodes, resources);

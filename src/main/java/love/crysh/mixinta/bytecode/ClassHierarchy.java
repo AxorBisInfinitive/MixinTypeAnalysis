@@ -9,7 +9,6 @@ import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.ClassNode;
 
 import java.io.IOException;
-import java.io.InputStream;
 import java.util.ArrayDeque;
 import java.util.HashMap;
 import java.util.HashSet;
@@ -19,9 +18,13 @@ import java.util.Set;
 /** 从字节码读取层次信息，计算栈帧期间避免定义或初始化被分析的类。 */
 public final class ClassHierarchy {
     private final Map<String, ClassNode> classes;
-    private final ClassLoader resources;
+    private final ClassByteSource resources;
 
     public ClassHierarchy(Map<String, ClassNode> classes, ClassLoader resources) {
+        this(classes, ClassByteSource.from(resources));
+    }
+
+    public ClassHierarchy(Map<String, ClassNode> classes, ClassByteSource resources) {
         this.classes = new HashMap<>(classes);
         this.resources = resources;
     }
@@ -191,12 +194,13 @@ public final class ClassHierarchy {
     }
 
     private ClassNode readResource(String name) {
-        try (InputStream input = resources.getResourceAsStream(name + ".class")) {
-            if (input == null) {
+        try {
+            byte[] bytes = resources.read(name);
+            if (bytes == null) {
                 throw new IllegalArgumentException("Class hierarchy metadata is missing for " + name);
             }
             ClassNode node = new ClassNode();
-            new ClassReader(input).accept(node, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
+            new ClassReader(bytes).accept(node, ClassReader.SKIP_CODE | ClassReader.SKIP_DEBUG | ClassReader.SKIP_FRAMES);
             return node;
         } catch (IOException failure) {
             throw new IllegalArgumentException("Cannot read class hierarchy for " + name, failure);

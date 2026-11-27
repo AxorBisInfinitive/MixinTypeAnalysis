@@ -1,13 +1,13 @@
 package love.crysh.mixinta.analysis;
 
 import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.bytecode.ClassByteSource;
+import love.crysh.mixinta.bytecode.MethodReferences;
 import love.crysh.mixinta.bytecode.ClassHierarchy;
 import love.crysh.mixinta.bytecode.PrimitiveConversions;
 import love.crysh.mixinta.diagnostic.Diagnostic;
 import love.crysh.mixinta.model.MethodKey;
 
-import org.objectweb.asm.ConstantDynamic;
-import org.objectweb.asm.Handle;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
@@ -39,10 +39,10 @@ public final class PreparedOverwrites {
     private final Map<String, byte[]> originals;
     private final Map<String, byte[]> mixins;
     private final List<Migration> migrations;
-    private final ClassLoader resources;
+    private final ClassByteSource resources;
 
     PreparedOverwrites(Map<String, byte[]> originals, Map<String, byte[]> mixins,
-            List<Migration> migrations, ClassLoader resources) {
+            List<Migration> migrations, ClassByteSource resources) {
         this.originals = ClassFiles.snapshot(originals);
         this.mixins = ClassFiles.snapshot(mixins);
         this.migrations = List.copyOf(migrations);
@@ -228,18 +228,13 @@ public final class PreparedOverwrites {
 
     private void checkConstant(Object constant, Map<MethodKey, Migration> migrations, ClassHierarchy hierarchy,
             MethodKey caller, int instruction, List<Diagnostic> diagnostics) {
-        if (constant instanceof Handle handle && handle.getTag() >= Opcodes.H_INVOKEVIRTUAL) {
+        MethodReferences.visitConstant(constant, handle -> {
             Migration migration = findMigration(handle.getOwner(), handle.getName(), handle.getDesc(),
                     migrations, hierarchy, caller, instruction, diagnostics);
             if (migration != null) {
                 diagnostics.add(problem("METHOD_HANDLE_NOT_IMPLEMENTED", caller, instruction, migration.original().toString()));
             }
-        } else if (constant instanceof ConstantDynamic dynamic) {
-            checkConstant(dynamic.getBootstrapMethod(), migrations, hierarchy, caller, instruction, diagnostics);
-            for (int index = 0; index < dynamic.getBootstrapMethodArgumentCount(); index++) {
-                checkConstant(dynamic.getBootstrapMethodArgument(index), migrations, hierarchy, caller, instruction, diagnostics);
-            }
-        }
+        });
     }
 
     private Migration findMigration(String owner, String name, String descriptor, Map<MethodKey, Migration> migrations,

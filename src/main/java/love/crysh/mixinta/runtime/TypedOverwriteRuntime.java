@@ -2,193 +2,500 @@ package love.crysh.mixinta.runtime;
 
 import love.crysh.mixinta.analysis.PreparedOverwrites;
 import love.crysh.mixinta.analysis.TypedOverwriteAnalyzer;
+import love.crysh.mixinta.bytecode.ClassByteSource;
+import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.bytecode.ClassHierarchy;
+import love.crysh.mixinta.bytecode.MethodReferences;
 import net.fabricmc.loader.api.FabricLoader;
 import net.fabricmc.loader.api.metadata.CustomValue;
-import org.objectweb.asm.ClassReader;
+import net.fabricmc.loader.impl.launch.FabricLauncherBase;
 import org.objectweb.asm.tree.ClassNode;
 import org.spongepowered.asm.mixin.MixinEnvironment;
+import org.spongepowered.asm.mixin.Mixins;
 import org.spongepowered.asm.mixin.transformer.IMixinTransformer;
 
 import java.io.IOException;
+import java.lang.reflect.InvocationTargetException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.Arrays;
+import java.util.HashMap;
 import java.util.LinkedHashMap;
+import java.util.LinkedHashSet;
 import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.function.BiFunction;
 import java.util.function.UnaryOperator;
+import java.util.jar.JarFile;
+import java.util.logging.Logger;
 
-/**
- * 一个 Knot ClassLoader 对应一个显式登记的封闭类集合。
- * initialize 必须先于集合中任意类的定义，结果整批发布，之后按加载顺序提供快照。
- */
+/** 一个 Knot ClassLoader 的显式分析域在首次定义前完成分析并整批发布。 */
 public final class TypedOverwriteRuntime {
-    private static final ClassLoader LOADER = TypedOverwriteRuntime.class.getClassLoader();
-    private static final Map<String, byte[]> ORIGINALS = new LinkedHashMap<>();
-    private static volatile Map<String, byte[]> outputs;
-    private static volatile Map<String, byte[]> afterMixins;
-    private static PreparedOverwrites prepared;
-    private static volatile Throwable failure;
-    private static boolean attempted;
+    private enum Phase { NEW, BOOTSTRAPPING, BOOTSTRAPPED, PREPARING, CONFIGURING, SNAPSHOTTING, ANALYZING, READY, INACTIVE, FAILED }
 
-    private TypedOverwriteRuntime() {
+    private record Failure(Throwable cause, Phase phase, boolean published) { }
+
+    private static final class SnapshotRequest {
+        final String name;
+        boolean consumed;
+
+        SnapshotRequest(String name) { this.name = name; }
     }
 
-    public static synchronized void prepare() {
-        if (attempted) {
+    private static final ClassLoader LOADER = TypedOverwriteRuntime.class.getClassLoader();
+    private static final Logger LOG = Logger.getLogger("love.crysh.mixinta.runtime");
+    private static final Object MONITOR = new Object();
+    private static final Set<String> PARTICIPANTS = ConcurrentHashMap.newKeySet();
+    private static final Set<String> MIXINS = new LinkedHashSet<>();
+    private static final Map<String, Class<?>> EXISTING = new ConcurrentHashMap<>();
+    private static final Map<String, byte[]> DEFINITION_INPUTS = new ConcurrentHashMap<>();
+    private static final Set<String> DEPENDENCIES = ConcurrentHashMap.newKeySet();
+    private static final Set<String> VERIFIED_SHAPES = ConcurrentHashMap.newKeySet();
+    private static final ThreadLocal<SnapshotRequest> REQUEST = new ThreadLocal<>();
+    private static final Map<String, byte[]> ORIGINALS = new LinkedHashMap<>();
+    private static volatile Map<String, byte[]> preparedMixins = Map.of();
+    private static volatile RuntimeSnapshot result;
+    private static volatile Failure failure;
+    private static volatile Phase phase = Phase.NEW;
+    private static volatile PreparedOverwrites prepared;
+    private static Map<String, byte[]> analysisInputs = Map.of();
+    private static Thread owner;
+    private static Class<?> agent;
+    private static long definitionVersion;
+    private static volatile boolean inputReady;
+    private static MixinEnvironment batchEnvironment;
+
+    private TypedOverwriteRuntime() { }
+
+    public static void bootstrap() {
+        synchronized (MONITOR) {
             checkFailure();
-            return;
+            if (phase != Phase.NEW) return;
+            owner = Thread.currentThread();
+            phase = Phase.BOOTSTRAPPING;
         }
-        attempted = true;
         try {
-            Map<String, byte[]> mixins = new LinkedHashMap<>();
             for (var mod : FabricLoader.getInstance().getAllMods()) {
                 CustomValue metadata = mod.getMetadata().getCustomValue("mixinta");
-                if (metadata != null) {
-                    readClasses(metadata.getAsObject().get("classes"), ORIGINALS);
-                    readClasses(metadata.getAsObject().get("mixins"), mixins);
-                }
+                if (metadata == null) continue;
+                register(metadata.getAsObject().get("classes"), PARTICIPANTS, mod.getMetadata().getId());
+                register(metadata.getAsObject().get("mixins"), MIXINS, mod.getMetadata().getId());
             }
-            for (String name : TypedOverwriteAnalyzer.requiredRuleClasses(mixins)) {
-                if (!ORIGINALS.containsKey(name) && !mixins.containsKey(name)) {
-                    readClass(name, ORIGINALS);
-                }
+            if (PARTICIPANTS.isEmpty() && MIXINS.isEmpty()) {
+                transition(Phase.INACTIVE);
+                return;
             }
-            prepared = new TypedOverwriteAnalyzer(LOADER).prepare(ORIGINALS, mixins);
-            Map<String, byte[]> preparedMixins = prepared.mixins();
-            Class<?> agent = attachAgent();
-            UnaryOperator<Object> preparation = value -> {
-                ClassNode original = (ClassNode) value;
-                byte[] replacement = preparedMixins.get(original.name);
-                if (replacement == null) {
-                    return value;
-                }
-                ClassNode node = new ClassNode();
-                new ClassReader(replacement).accept(node, 0);
-                return node;
-            };
+            Path jar = Path.of(TypedOverwriteRuntime.class.getProtectionDomain().getCodeSource().getLocation().toURI());
+            agent = attachAgent(jar);
+            if (Class.forName(ClassNode.class.getName(), false, agent.getClassLoader()) != ClassNode.class
+                    || Class.forName(MixinEnvironment.class.getName(), false, agent.getClassLoader()) != MixinEnvironment.class) {
+                throw fail("UNSHARED_TRANSFORMER_API", "ASM and Mixin must resolve to the same API classes");
+            }
+            UnaryOperator<Object> preparation = TypedOverwriteRuntime::prepareMixin;
             BiFunction<ClassLoader, Object[], byte[]> publication = TypedOverwriteRuntime::publishedClass;
-            BiFunction<String, byte[], byte[]> cache = TypedOverwriteRuntime::cachedMixinResult;
+            BiFunction<Object[], byte[], byte[]> cache = TypedOverwriteRuntime::beforeTransform;
             agent.getMethod("connect", UnaryOperator.class, BiFunction.class, BiFunction.class)
                     .invoke(null, preparation, publication, cache);
+            preloadSupport(jar);
+            transition(Phase.BOOTSTRAPPED);
+            LOG.fine("MixinTA bootstrap connected");
         } catch (Throwable cause) {
-            failure = cause;
+            retain(cause);
             checkFailure();
+        } finally {
+            releaseOwner();
         }
     }
 
-    public static synchronized void initialize() {
-        if (!attempted) {
-            boolean registered = FabricLoader.getInstance().getAllMods().stream()
-                    .anyMatch(mod -> mod.getMetadata().getCustomValue("mixinta") != null);
-            if (registered) {
-                throw new IllegalStateException("mixinta metadata requires TypedOverwritePlugin during Mixin config preparation");
-            }
+    public static void prepare() {
+        bootstrap();
+        if (phase == Phase.INACTIVE) return;
+        if (prepared != null) {
+            checkFailure();
             return;
         }
-        checkFailure();
-        if (outputs != null) {
-            return;
-        }
+        advance(false);
+    }
+
+    public static void initialize() {
+        bootstrap();
+        if (phase != Phase.INACTIVE) advance(true);
+    }
+
+    private static void advance(boolean complete) {
+        if (!acquireOwner(complete)) return;
         try {
-            IMixinTransformer transformer = (IMixinTransformer) MixinEnvironment.getCurrentEnvironment().getActiveTransformer();
-            afterMixins = new LinkedHashMap<>();
-            for (var entry : ORIGINALS.entrySet()) {
-                String name = entry.getKey().replace('/', '.');
-                afterMixins.put(entry.getKey(), transformer.transformClassBytes(name, name, entry.getValue().clone()));
-            }
-            Map<String, byte[]> transformed = prepared.analyze(afterMixins).apply();
-            checkFailure();
-            outputs = transformed;
+            if (!inputsAvailable()) throw fail("INPUT_NOT_READY", "application classpath is locked");
+            prepareDeclarations();
+            if (complete) analyze();
         } catch (Throwable cause) {
-            failure = cause;
+            retain(cause);
             checkFailure();
+        } finally {
+            releaseOwner();
+        }
+    }
+
+    private static boolean acquireOwner(boolean complete) {
+        while (true) {
+            synchronized (MONITOR) {
+                checkFailure();
+                if (result != null || (!complete && prepared != null)) return false;
+                if (owner == Thread.currentThread()) throw fail("REENTRANT_INITIALIZATION", "complete=" + complete);
+                if (owner == null) {
+                    owner = Thread.currentThread();
+                    return true;
+                }
+                if (phase != Phase.ANALYZING) throw fail("CONCURRENT_PREPARATION", "owner=" + owner.getName());
+            }
+            LOG.fine("MixinTA waiting for batch");
+            synchronized (MONITOR) {
+                try {
+                    while (owner != null && result == null && failure == null) MONITOR.wait();
+                } catch (InterruptedException interrupted) {
+                    Thread.currentThread().interrupt();
+                    retain(interrupted);
+                    checkFailure();
+                }
+                checkFailure();
+            }
+        }
+    }
+
+    private static byte[] beforeTransform(Object[] arguments, byte[] input) {
+        if (arguments[0] != MixinEnvironment.getCurrentEnvironment().getActiveTransformer()) return null;
+        String binaryName = (String) arguments[1];
+        if (binaryName == null) return null;
+        String name = binaryName.replace('.', '/');
+        SnapshotRequest request = REQUEST.get();
+        if (request != null && !request.consumed && request.name.equals(name)) {
+            request.consumed = true;
+            return null;
+        }
+        boolean participant = PARTICIPANTS.contains(name);
+        synchronized (MONITOR) {
+            if (failure != null) {
+                if (participant) checkFailure();
+                return null;
+            }
+            if (phase == Phase.BOOTSTRAPPING) {
+                if (participant) throw fail("INPUT_NOT_READY", name);
+                return null;
+            }
+            if (owner == Thread.currentThread() && result == null) {
+                if (participant) throw fail("REENTRANT_DEFINITION", name);
+                return null;
+            }
+            if (owner != null && !participant) return null;
+        }
+        if (result != null) checkConfiguration();
+        if (result == null) {
+            if (!inputsAvailable()) {
+                if (participant) throw fail("INPUT_NOT_READY", name);
+                return null;
+            }
+            // 在外层转换检查点完成批次，避免进入目标应用过程后嵌套调度。
+            advance(true);
+        }
+        if (!participant) return null;
+        checkFailure();
+        RuntimeSnapshot snapshot = result;
+        if (!Arrays.equals(snapshot.beforeMixins().get(name), input)) throw fail("INPUT_CHANGED", name);
+        LOG.fine("MixinTA verified Mixin input " + name);
+        return snapshot.afterMixins().get(name).clone();
+    }
+
+    private static Object prepareMixin(Object value) {
+        ClassNode original = (ClassNode) value;
+        if (!MIXINS.contains(original.name)) return value;
+        checkFailure();
+        byte[] replacement = preparedMixins.get(original.name);
+        if (replacement == null) throw fail("DECLARATIONS_NOT_READY", original.name);
+        return ClassFiles.read(replacement);
+    }
+
+    private static void prepareDeclarations() throws IOException {
+        if (prepared != null) return;
+        transition(Phase.PREPARING);
+        for (String name : PARTICIPANTS.stream().sorted().toList()) ORIGINALS.put(name, readInput(name));
+        Map<String, byte[]> mixins = new LinkedHashMap<>();
+        for (String name : MIXINS) mixins.put(name, readInput(name));
+        for (String name : TypedOverwriteAnalyzer.requiredRuleClasses(mixins)) {
+            if (!ORIGINALS.containsKey(name) && !mixins.containsKey(name)) {
+                PARTICIPANTS.add(name);
+                ORIGINALS.put(name, readInput(name));
+            }
+        }
+        prepared = new TypedOverwriteAnalyzer((ClassByteSource) TypedOverwriteRuntime::readDependency).prepare(ORIGINALS, mixins);
+        preparedMixins = prepared.mixins();
+        LOG.fine("MixinTA declarations prepared");
+    }
+
+    private static void analyze() throws Exception {
+        transition(Phase.CONFIGURING);
+        IMixinTransformer transformer = (IMixinTransformer) MixinEnvironment.getCurrentEnvironment().getActiveTransformer();
+        if (transformer == null) throw fail("MIXIN_NOT_READY", "active transformer is missing");
+        int remaining;
+        do {
+            int previous = Mixins.getUnvisitedCount();
+            transformer.couldTransformClass(MixinEnvironment.getCurrentEnvironment(), TypedOverwriteRuntime.class.getName());
+            remaining = Mixins.getUnvisitedCount();
+            if (remaining > 0 && remaining >= previous) throw fail("MIXIN_CONFIGURATION_NOT_READY", "unvisited=" + remaining);
+        } while (remaining > 0);
+        batchEnvironment = MixinEnvironment.getCurrentEnvironment();
+        checkFailure();
+        transition(Phase.SNAPSHOTTING);
+        Map<String, byte[]> snapshots = new LinkedHashMap<>();
+        for (var entry : ORIGINALS.entrySet()) {
+            SnapshotRequest previous = REQUEST.get();
+            REQUEST.set(new SnapshotRequest(entry.getKey()));
+            try {
+                String name = entry.getKey().replace('/', '.');
+                snapshots.put(entry.getKey(), transformer.transformClassBytes(name, name, entry.getValue().clone()));
+            } finally {
+                if (previous == null) REQUEST.remove();
+                else REQUEST.set(previous);
+            }
+        }
+        checkConfiguration();
+        analysisInputs = snapshots;
+        refreshExisting();
+        for (var entry : EXISTING.entrySet()) {
+            byte[] bytes = snapshots.get(entry.getKey());
+            if (bytes != null && ClassFiles.read(bytes).methods.stream().allMatch(method -> method.instructions.size() == 0)) {
+                DefinedClassShape.verify(entry.getKey(), bytes, entry.getValue());
+                VERIFIED_SHAPES.add(entry.getKey());
+            }
+        }
+        transition(Phase.ANALYZING);
+        var plan = prepared.analyze(snapshots);
+        Map<String, byte[]> transformed = plan.apply();
+        RuntimeSnapshot snapshot = new RuntimeSnapshot(ORIGINALS, snapshots, transformed,
+                plan.modifiedClasses(), plan.retiredMethods());
+        refreshExisting();
+        for (String name : snapshot.modifiedClasses()) {
+            if (EXISTING.containsKey(name)) throw fail("EARLY_MODIFIED_CLASS", name);
+        }
+        for (var entry : EXISTING.entrySet()) {
+            byte[] bytes = snapshots.get(entry.getKey());
+            if (bytes != null && (!VERIFIED_SHAPES.contains(entry.getKey())
+                    || ClassFiles.read(bytes).methods.stream().anyMatch(method -> method.instructions.size() != 0))) {
+                throw fail("UNVERIFIED_EARLY_CLASS", entry.getKey());
+            }
+        }
+        publish(snapshot);
+        LOG.fine("MixinTA batch ready");
+    }
+
+    private static void refreshExisting() throws ReflectiveOperationException {
+        for (Class<?> type : (Class<?>[]) agent.getMethod("loadedClasses", ClassLoader.class).invoke(null, LOADER)) {
+            EXISTING.put(type.getName().replace('.', '/'), type);
+        }
+    }
+
+    private static void publish(RuntimeSnapshot snapshot) {
+        long checkedVersion = -1;
+        while (true) {
+            checkConfiguration();
+            Map<String, byte[]> observed;
+            synchronized (MONITOR) {
+                checkFailure();
+                if (checkedVersion == definitionVersion) {
+                    result = snapshot;
+                    phase = Phase.READY;
+                    DEFINITION_INPUTS.keySet().removeIf(name -> !PARTICIPANTS.contains(name) && !DEPENDENCIES.contains(name));
+                    return;
+                }
+                checkedVersion = definitionVersion;
+                observed = new HashMap<>(DEFINITION_INPUTS);
+            }
+            for (var entry : observed.entrySet()) {
+                if (!PARTICIPANTS.contains(entry.getKey())) checkRetiredReferences(snapshot, entry.getKey(), entry.getValue());
+            }
         }
     }
 
     private static byte[] publishedClass(ClassLoader loader, Object[] arguments) {
+        if (loader != LOADER || arguments[0] == null) return null;
         String name = (String) arguments[0];
-        if (loader != LOADER || !ORIGINALS.containsKey(name)) {
+        byte[] bytes = (byte[]) arguments[1];
+        if (bytes == null) {
+            if (arguments.length > 2 && arguments[2] instanceof Class<?> type && !type.isArray()) EXISTING.put(name, type);
             return null;
         }
-        checkFailure();
-        if (outputs == null) {
-            failure = new IllegalStateException("MixinTA class loaded before batch initialization: " + name);
-            checkFailure();
-        }
-        if (!Arrays.equals(afterMixins.get(name), (byte[]) arguments[1])) {
-            failure = new IllegalStateException("MixinTA post-Mixin snapshot changed before definition: " + name);
-            checkFailure();
-        }
-        return outputs.get(name).clone();
-    }
-
-    private static byte[] cachedMixinResult(String binaryName, byte[] input) {
-        if (binaryName == null || outputs == null) {
-            return null;
-        }
-        String name = binaryName.replace('.', '/');
-        if (!ORIGINALS.containsKey(name)) {
-            return null;
-        }
-        checkFailure();
-        if (!Arrays.equals(ORIGINALS.get(name), input)) {
-            failure = new IllegalStateException("MixinTA input changed after batch preparation: " + name);
-            checkFailure();
-        }
-        // 复用真实 Mixin 的结果，使 config plugin 与 extension 对每个登记类只执行一次。
-        return afterMixins.get(name).clone();
-    }
-
-    private static void readClasses(CustomValue value, Map<String, byte[]> destination) throws IOException {
-        if (value == null) {
-            throw new IllegalArgumentException("mixinta metadata requires classes and mixins arrays");
-        }
-        for (CustomValue item : value.getAsArray()) {
-            String name = item.getAsString().replace('.', '/');
-            readClass(name, destination);
-        }
-    }
-
-    private static void readClass(String name, Map<String, byte[]> destination) throws IOException {
-        try (var input = LOADER.getResourceAsStream(name + ".class")) {
-            if (input == null) {
-                throw new IOException("Missing registered class " + name);
+        RuntimeSnapshot snapshot;
+        synchronized (MONITOR) {
+            snapshot = result;
+            if (snapshot == null) {
+                DEFINITION_INPUTS.put(name, bytes.clone());
+                definitionVersion++;
+                if (PARTICIPANTS.contains(name)) {
+                    ClassNode candidate = ClassFiles.read(bytes);
+                    boolean readOnlyShape = (candidate.access & org.objectweb.asm.Opcodes.ACC_INTERFACE) != 0
+                            && candidate.methods.stream().allMatch(method -> method.instructions.size() == 0);
+                    if (!readOnlyShape) throw fail("EARLY_DEFINITION", name);
+                }
+                return null;
             }
-            destination.put(name, input.readAllBytes());
+        }
+        if (!PARTICIPANTS.contains(name)) {
+            checkConfiguration();
+            checkRetiredReferences(snapshot, name, bytes);
+            return null;
+        }
+        checkFailure();
+        if (!Arrays.equals(snapshot.afterMixins().get(name), bytes)) throw fail("POST_MIXIN_INPUT_CHANGED", name);
+        LOG.fine("MixinTA verified definition input " + name);
+        return snapshot.outputs().get(name).clone();
+    }
+
+    private static void checkRetiredReferences(RuntimeSnapshot snapshot, String name, byte[] bytes) {
+        if (snapshot.retiredMethods().isEmpty() || name.startsWith("love/crysh/mixinta/")) return;
+        ClassNode node = ClassFiles.read(bytes);
+        Map<String, ClassNode> nodes = new HashMap<>();
+        snapshot.afterMixins().forEach((key, value) -> nodes.put(key, ClassFiles.read(value)));
+        nodes.put(name, node);
+        ClassHierarchy hierarchy = new ClassHierarchy(nodes, (ClassByteSource) TypedOverwriteRuntime::readDependency);
+        for (var method : node.methods) {
+            MethodReferences.visit(method, (instruction, reference) -> {
+                boolean candidate = snapshot.retiredMethods().stream().anyMatch(retired ->
+                        retired.name().equals(reference.name()) && retired.descriptor().equals(reference.descriptor()));
+                if (!candidate) return;
+                try {
+                    var resolved = hierarchy.resolve(reference.owner(), reference.name(), reference.descriptor());
+                    if (snapshot.retiredMethods().contains(resolved)) {
+                        throw fail("LATE_OLD_DESCRIPTOR", name + "." + method.name + method.desc
+                                + " instruction=" + instruction + " -> " + reference);
+                    }
+                } catch (IllegalArgumentException missing) {
+                    throw fail("UNRESOLVED_LATE_REFERENCE", reference + " " + missing.getMessage());
+                }
+            });
         }
     }
 
-    private static Class<?> attachAgent() throws Exception {
-        Path jar = Path.of(TypedOverwriteRuntime.class.getProtectionDomain().getCodeSource().getLocation().toURI());
-        if (!Files.isRegularFile(jar)) {
-            throw new IllegalStateException("MixinTA must be loaded from a packaged JAR: " + jar);
+    private static byte[] readInput(String name) throws IOException {
+        byte[] bytes = FabricLauncherBase.getLauncher().getClassByteArray(name.replace('/', '.'), true);
+        if (bytes == null) throw new IOException("Missing registered class " + name);
+        return bytes;
+    }
+
+    private static void checkConfiguration() {
+        if (batchEnvironment != null && (batchEnvironment != MixinEnvironment.getCurrentEnvironment()
+                || Mixins.getUnvisitedCount() != 0)) {
+            throw fail("MIXIN_CONFIGURATION_CHANGED", "batch environment or registered configurations changed");
         }
+    }
+
+    private static byte[] readDependency(String name) throws IOException {
+        RuntimeSnapshot published = result;
+        byte[] bytes = published == null ? analysisInputs.get(name) : published.outputs().get(name);
+        if (bytes != null) return bytes.clone();
+        bytes = ORIGINALS.get(name);
+        if (bytes != null) return bytes.clone();
+        DEPENDENCIES.add(name);
+        bytes = DEFINITION_INPUTS.get(name);
+        if (bytes != null) return bytes.clone();
+        bytes = name.startsWith("java/") || name.startsWith("jdk/")
+                ? ClassByteSource.from(LOADER).read(name) : readInput(name);
+        Class<?> defined = EXISTING.get(name);
+        if (defined != null && bytes != null && !VERIFIED_SHAPES.contains(name)) {
+            if (phase == Phase.ANALYZING || phase == Phase.READY) throw fail("UNVERIFIED_LOADED_DEPENDENCY", name);
+            DefinedClassShape.verify(name, bytes, defined);
+            VERIFIED_SHAPES.add(name);
+        }
+        return bytes;
+    }
+
+    private static boolean inputsAvailable() {
+        if (inputReady) return true;
+        try {
+            FabricLauncherBase.getLauncher().getClassByteArray(FabricLauncherBase.getLauncher().getEntrypoint(), true);
+            inputReady = true;
+            return true;
+        } catch (IllegalStateException locked) {
+            if ("early getClassByteArray access".equals(locked.getMessage())) return false;
+            throw locked;
+        } catch (IOException missing) {
+            throw fail("INPUT_UNAVAILABLE", missing.getMessage());
+        }
+    }
+
+    private static void register(CustomValue values, Set<String> destination, String mod) {
+        if (values == null) throw new IllegalArgumentException("mixinta metadata requires classes and mixins arrays in " + mod);
+        for (CustomValue value : values.getAsArray()) destination.add(value.getAsString().replace('.', '/'));
+    }
+
+    private static void preloadSupport(Path jar) throws Exception {
+        try (JarFile archive = new JarFile(jar.toFile())) {
+            for (var entry : archive.stream().filter(value -> value.getName().endsWith(".class")
+                    && value.getName().startsWith("love/crysh/mixinta/")
+                    && !value.getName().startsWith("love/crysh/mixinta/runtime/agent/")).toList()) {
+                Class.forName(entry.getName().substring(0, entry.getName().length() - 6).replace('/', '.'), false, LOADER);
+            }
+        }
+    }
+
+    private static Class<?> attachAgent(Path jar) throws Exception {
+        if (!Files.isRegularFile(jar)) throw new IllegalStateException("MixinTA must be loaded from a packaged JAR: " + jar);
         String executable = System.getProperty("os.name").startsWith("Windows") ? "java.exe" : "java";
         Process helper = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", executable).toString(),
-                "--add-modules=jdk.attach", "-cp", jar.toString(),
-                "love.crysh.mixinta.runtime.agent.AgentAttacher", Long.toString(ProcessHandle.current().pid()), jar.toString())
-                .inheritIO().start();
+                "--add-modules=jdk.attach", "-cp", jar.toString(), "love.crysh.mixinta.runtime.agent.AgentAttacher",
+                Long.toString(ProcessHandle.current().pid()), jar.toString()).inheritIO().start();
         try {
-            if (!helper.waitFor(30, TimeUnit.SECONDS)) {
-                helper.destroyForcibly();
-                throw new IllegalStateException("MixinTA agent attachment timed out");
-            }
-            if (helper.exitValue() != 0) {
-                throw new IllegalStateException("MixinTA agent attachment failed: " + helper.exitValue());
-            }
+            if (!helper.waitFor(30, TimeUnit.SECONDS)) throw new IllegalStateException("MixinTA agent attachment timed out");
+            if (helper.exitValue() != 0) throw new IllegalStateException("MixinTA agent attachment failed: " + helper.exitValue());
         } catch (InterruptedException interrupted) {
-            helper.destroyForcibly();
             Thread.currentThread().interrupt();
             throw interrupted;
+        } finally {
+            if (helper.isAlive()) helper.destroyForcibly();
         }
         return Class.forName("love.crysh.mixinta.runtime.agent.RuntimeAgent", true, ClassLoader.getSystemClassLoader());
     }
 
-    private static void checkFailure() {
-        if (failure != null) {
-            throw new IllegalStateException("MixinTA batch initialization failed", failure);
+    private static void transition(Phase next) {
+        synchronized (MONITOR) {
+            checkFailure();
+            phase = next;
         }
+        LOG.fine("MixinTA phase=" + next);
+    }
+
+    private static void releaseOwner() {
+        synchronized (MONITOR) {
+            owner = null;
+            if (failure == null && result == null && phase != Phase.INACTIVE) phase = Phase.BOOTSTRAPPED;
+            MONITOR.notifyAll();
+        }
+    }
+
+    private static IllegalStateException fail(String code, String detail) {
+        retain(new IllegalStateException(code + " " + detail + " phase=" + phase));
+        return failureException();
+    }
+
+    private static void retain(Throwable cause) {
+        if (cause instanceof InvocationTargetException wrapped && wrapped.getCause() != null) cause = wrapped.getCause();
+        boolean first;
+        synchronized (MONITOR) {
+            first = failure == null;
+            if (first) failure = new Failure(cause, phase, result != null);
+            phase = Phase.FAILED;
+            MONITOR.notifyAll();
+        }
+        if (first) LOG.fine("MixinTA failure retained");
+    }
+
+    private static IllegalStateException failureException() {
+        Failure saved = failure;
+        return new IllegalStateException("MixinTA initialization failed phase=" + saved.phase()
+                + " outputsPublished=" + saved.published(), saved.cause());
+    }
+
+    private static void checkFailure() {
+        if (failure != null) throw failureException();
     }
 }

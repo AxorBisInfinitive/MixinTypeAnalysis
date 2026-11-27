@@ -26,6 +26,7 @@ public final class InitializationProbePlugin implements IMixinConfigPlugin {
     public void onLoad(String mixinPackage) {
         loads++;
         System.out.println("PLUGIN_LOAD state=" + InitializationProbeRuntime.state());
+        if (Boolean.getBoolean("probe.concurrentConfig")) requestCallerOnAnotherThread();
         if (Boolean.getBoolean("probe.reentrant")) {
             try {
                 Class.forName("fixture.business.Subject", false, getClass().getClassLoader());
@@ -71,6 +72,7 @@ public final class InitializationProbePlugin implements IMixinConfigPlugin {
     @Override
     public void postApply(String name, ClassNode node, String mixin, IMixinInfo info) {
         applications++;
+        if (Boolean.getBoolean("probe.concurrentPlugin")) requestCallerOnAnotherThread();
         if (Boolean.getBoolean("probe.introducedCall")) {
             MethodNode method = new MethodNode(Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, "introduced", "()I", null, null);
             method.instructions.add(new IntInsnNode(Opcodes.BIPUSH, 10));
@@ -84,5 +86,19 @@ public final class InitializationProbePlugin implements IMixinConfigPlugin {
             node.methods.stream().filter(method -> method.name.equals("div") && method.desc.equals("(II)I"))
                     .findFirst().orElseThrow().instructions.insert(new InsnNode(Opcodes.NOP));
         }
+    }
+
+    private void requestCallerOnAnotherThread() {
+        Thread thread = new Thread(() -> {
+            try { Class.forName("fixture.business.Caller", false, getClass().getClassLoader()); }
+            catch (Throwable failure) { System.out.println("PLUGIN_CONCURRENT_CAUGHT=" + failure); }
+        }, "plugin-participant-loader");
+        thread.start();
+        try { thread.join(5000); }
+        catch (InterruptedException failure) {
+            Thread.currentThread().interrupt();
+            throw new AssertionError(failure);
+        }
+        if (thread.isAlive()) throw new AssertionError("Plugin participant request deadlocked");
     }
 }
