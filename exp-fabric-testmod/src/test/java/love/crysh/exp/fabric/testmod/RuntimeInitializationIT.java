@@ -379,9 +379,11 @@ class RuntimeInitializationIT {
         result.failure("Cannot load class fixture.environment.ClientOnly in environment type SERVER");
     }
 
-    @Test
-    void rejectsLateOldDescriptorCallsAtClassDefinition() throws Exception {
-        Result result = launch("late-caller", """
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rejectsLateOldDescriptorCallsAtClassDefinition(boolean failingLogger) throws Exception {
+        String scenario = failingLogger ? "late-caller-logger-failure" : "late-caller";
+        Result result = launch(scenario, """
                 if (Boolean.getBoolean("probe.lateCheck")) {
                     try {
                         Class.forName("fixture.late.LateCaller", false, Main.class.getClassLoader());
@@ -394,8 +396,12 @@ class RuntimeInitializationIT {
                 """, Map.of("fixture.late.LateCaller", """
                 package fixture.late;
                 public class LateCaller { public static int call(){ return fixture.business.Subject.div(10,4); } }
-                """), List.of(), false, List.of("-Dprobe.lateCheck=true"));
-        result.failure("LATE_OLD_DESCRIPTOR fixture/late/LateCaller.call", "FAILURE_RETAINED OUTPUTS_PUBLISHED");
+                """), List.of(), false, List.of("-Dprobe.lateCheck=true", "-Dprobe.failAgentLogger=" + failingLogger));
+        result.failure("LATE_OLD_DESCRIPTOR fixture/late/LateCaller.call", "FAILURE_RETAINED OUTPUTS_PUBLISHED",
+                "AGENT_ERROR_LOG_VERIFIED=MixinTA class transformation failed for fixture/late/LateCaller",
+                "java.lang.IllegalStateException: MixinTA initialization failed",
+                "TypedOverwriteRuntime.checkRetiredReferences", "java.lang.ClassFormatError");
+        if (failingLogger) result.contains("AGENT_LOGGER_FAILURE");
         assertFalse(result.log().contains("NoSuchMethodError"), result.log());
     }
 

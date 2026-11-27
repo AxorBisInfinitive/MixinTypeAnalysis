@@ -20,12 +20,15 @@ import java.util.Arrays;
 import java.util.Objects;
 import java.util.function.BiFunction;
 import java.util.function.UnaryOperator;
+import java.util.logging.Level;
+import java.util.logging.Logger;
 
 /**
  * 此类由 app ClassLoader 定义，回调使用 JDK 接口跨越 app 与 Knot 的边界。
  * ASM 和 Mixin API 必须由共同父 ClassLoader 提供。
  */
 public final class RuntimeAgent implements ClassFileTransformer {
+    private static final Logger LOG = Logger.getLogger("love.crysh.mixinta.runtime.agent");
     private static final String MIXIN_INFO = "org/spongepowered/asm/mixin/transformer/MixinInfo";
     private static final String MIXIN_TRANSFORMER = "org/spongepowered/asm/mixin/transformer/MixinTransformer";
     private record Callbacks(UnaryOperator<Object> preparation,
@@ -136,7 +139,11 @@ public final class RuntimeAgent implements ClassFileTransformer {
             return current.publication().apply(loader, new Object[] {name, bytes});
         } catch (Throwable failure) {
             // JVM 会忽略 transformer 抛出的异常。非法 class 数据确保 defineClass 失败。
-            failure.printStackTrace(System.err);
+            try {
+                LOG.log(Level.SEVERE, "MixinTA class transformation failed for " + name, failure);
+            } catch (Throwable ignored) {
+                // 日志设施失败时继续拒绝类定义。
+            }
             return new byte[] {0};
         }
     }

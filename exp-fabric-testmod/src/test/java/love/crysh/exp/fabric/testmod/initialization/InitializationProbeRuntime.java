@@ -21,6 +21,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.logging.ConsoleHandler;
 import java.util.logging.Handler;
 import java.util.logging.Level;
 import java.util.logging.LogRecord;
@@ -43,10 +44,23 @@ public final class InitializationProbeRuntime {
         Logger logger = Logger.getLogger("love.crysh.mixinta.runtime");
         logger.setLevel(Level.FINE);
         logger.setUseParentHandlers(false);
+        ConsoleHandler errors = new ConsoleHandler();
+        errors.setLevel(Level.WARNING);
+        logger.addHandler(errors);
         logger.addHandler(new Handler() {
             @Override
             public void publish(LogRecord record) {
                 String message = record.getMessage();
+                if ("love.crysh.mixinta.runtime.agent".equals(record.getLoggerName())) {
+                    if (record.getLevel() != Level.SEVERE || record.getThrown() == null) {
+                        throw new AssertionError("Missing Agent error level or cause");
+                    }
+                    System.out.println("AGENT_ERROR_LOG_VERIFIED=" + message);
+                    if (Boolean.getBoolean("probe.failAgentLogger")) {
+                        System.out.println("AGENT_LOGGER_FAILURE");
+                        throw new IllegalStateException("Agent log handler failure");
+                    }
+                }
                 if (message.startsWith("MixinTA verified Mixin input ")) {
                     VERIFIED_MIXIN_INPUTS.add(message.substring("MixinTA verified Mixin input ".length()));
                 }
