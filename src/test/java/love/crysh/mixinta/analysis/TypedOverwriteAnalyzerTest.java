@@ -1,5 +1,6 @@
 package love.crysh.mixinta.analysis;
 
+import love.crysh.mixinta.analysis.declaration.MixinAnnotations;
 import love.crysh.mixinta.bytecode.ClassFiles;
 import love.crysh.mixinta.diagnostic.TypedOverwriteException;
 import love.crysh.mixinta.testsupport.BytecodeFixtures;
@@ -74,23 +75,23 @@ class TypedOverwriteAnalyzerTest {
                 public static int div(int a, int b) { return a * b; }
                 """);
         ClassNode mixin = ClassFiles.read(fixture.mixins().get("sample/SubjectMixin"));
-        var metadata = ClassFiles.annotation(mixin.invisibleAnnotations, ClassFiles.MIXIN);
+        var metadata = ClassFiles.annotation(mixin.invisibleAnnotations, MixinAnnotations.MIXIN);
         metadata.values.addAll(List.of("priority", 2000));
         fixture.mixins().put(mixin.name, ClassFiles.write(mixin));
         byte[] original = fixture.originals().get("sample/Subject").clone();
         PreparedOverwrites preparation = fixture.prepare();
         ClassNode prepared = ClassFiles.read(preparation.mixins().get(mixin.name));
         MethodNode method = ClassFiles.findMethod(prepared, "div", "(II)I");
-        AnnotationNode nativeOverwrite = ClassFiles.annotation(method.visibleAnnotations, ClassFiles.OVERWRITE);
+        AnnotationNode nativeOverwrite = ClassFiles.annotation(method.visibleAnnotations, MixinAnnotations.OVERWRITE);
         assertNotNull(nativeOverwrite);
-        assertNull(ClassFiles.annotation(method.visibleAnnotations, ClassFiles.TYPED_OVERWRITE));
+        assertNull(ClassFiles.annotation(method.visibleAnnotations, MixinAnnotations.TYPED_OVERWRITE));
         assertEquals(List.of("fallback"), ClassFiles.value(nativeOverwrite, "aliases", null));
         assertEquals(false, ClassFiles.value(nativeOverwrite, "remap", true));
         assertEquals("FEATURE(1)", ClassFiles.value(nativeOverwrite, "constraints", null));
         assertEquals("absent", ClassFiles.value(nativeOverwrite, "method", "absent"));
-        assertEquals(2000, ClassFiles.value(ClassFiles.annotation(prepared.invisibleAnnotations, ClassFiles.MIXIN), "priority", null));
+        assertEquals(2000, ClassFiles.value(ClassFiles.annotation(prepared.invisibleAnnotations, MixinAnnotations.MIXIN), "priority", null));
         assertArrayEquals(original, fixture.originals().get("sample/Subject"));
-        assertNotNull(ClassFiles.annotation(ClassFiles.findMethod(ClassFiles.read(original), "div", "(II)I").visibleAnnotations, ClassFiles.FINAL));
+        assertNotNull(ClassFiles.annotation(ClassFiles.findMethod(ClassFiles.read(original), "div", "(II)I").visibleAnnotations, MixinAnnotations.FINAL));
     }
 
     @Test
@@ -118,9 +119,9 @@ class TypedOverwriteAnalyzerTest {
         for (var entry : preparation.mixins().entrySet()) {
             ClassNode before = ClassFiles.read(fixture.mixins().get(entry.getKey()));
             ClassNode after = ClassFiles.read(entry.getValue());
-            assertEquals(ClassFiles.value(ClassFiles.annotation(before.invisibleAnnotations, ClassFiles.MIXIN), "priority", null),
-                    ClassFiles.value(ClassFiles.annotation(after.invisibleAnnotations, ClassFiles.MIXIN), "priority", null));
-            assertNotNull(ClassFiles.annotation(ClassFiles.findMethod(after, "div", "(II)I").visibleAnnotations, ClassFiles.OVERWRITE));
+            assertEquals(ClassFiles.value(ClassFiles.annotation(before.invisibleAnnotations, MixinAnnotations.MIXIN), "priority", null),
+                    ClassFiles.value(ClassFiles.annotation(after.invisibleAnnotations, MixinAnnotations.MIXIN), "priority", null));
+            assertNotNull(ClassFiles.annotation(ClassFiles.findMethod(after, "div", "(II)I").visibleAnnotations, MixinAnnotations.OVERWRITE));
         }
     }
 
@@ -140,7 +141,7 @@ class TypedOverwriteAnalyzerTest {
                 private static int replacement(int a, int b) { return a + b; }
                 """);
         ClassNode prepared = ClassFiles.read(fixture.prepare().mixins().get("sample/SubjectMixin"));
-        var annotation = ClassFiles.annotation(ClassFiles.findMethod(prepared, "replacement", "(II)I").visibleAnnotations, ClassFiles.OVERWRITE);
+        var annotation = ClassFiles.annotation(ClassFiles.findMethod(prepared, "replacement", "(II)I").visibleAnnotations, MixinAnnotations.OVERWRITE);
         assertEquals(List.of("div"), ClassFiles.value(annotation, "aliases", null));
     }
 
@@ -158,7 +159,7 @@ class TypedOverwriteAnalyzerTest {
         MethodNode implementation = ClassFiles.findMethod(transformed, "div", "(DD)I");
         assertNotNull(implementation);
         assertEquals(0, implementation.access & Opcodes.ACC_SYNTHETIC);
-        assertNull(ClassFiles.annotation(implementation.visibleAnnotations, ClassFiles.TYPED_OVERWRITE));
+        assertNull(ClassFiles.annotation(implementation.visibleAnnotations, MixinAnnotations.TYPED_OVERWRITE));
         assertEquals(25, invoke(result, "sample.Subject", "run"));
         assertArrayEquals(plan.apply().get("sample/Subject"), result.get("sample/Subject"));
         assertNotNull(ClassFiles.findMethod(ClassFiles.read(afterMixins.get("sample/Subject")), "div", "(II)I"));

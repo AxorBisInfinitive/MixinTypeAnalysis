@@ -1,10 +1,15 @@
 package love.crysh.mixinta.analysis;
 
-import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.analysis.declaration.Migration;
+import love.crysh.mixinta.analysis.declaration.MixinAnnotations;
+import love.crysh.mixinta.analysis.declaration.RepresentationMigration;
+import love.crysh.mixinta.analysis.declaration.RepresentationRuleReader;
 import love.crysh.mixinta.bytecode.ClassByteSource;
+import love.crysh.mixinta.bytecode.ClassFiles;
 import love.crysh.mixinta.bytecode.ClassHierarchy;
 import love.crysh.mixinta.bytecode.PrimitiveConversions;
 import love.crysh.mixinta.diagnostic.Diagnostic;
+import love.crysh.mixinta.diagnostic.TypedOverwriteException;
 import love.crysh.mixinta.model.MethodKey;
 
 import org.objectweb.asm.Opcodes;
@@ -42,26 +47,26 @@ public final class TypedOverwriteAnalyzer {
 
     /** 返回规则容器的内部类名，运行时应在准备批次前读取其 class 资源。 */
     public static Set<String> requiredRuleClasses(Map<String, byte[]> mixinClasses) {
-        return RepresentationRules.requiredClasses(mixinClasses);
+        return RepresentationRuleReader.requiredClasses(mixinClasses);
     }
 
     public PreparedOverwrites prepare(Map<String, byte[]> originals, Map<String, byte[]> mixinClasses) {
         Map<String, byte[]> originalSnapshot = ClassFiles.snapshot(originals);
         List<Diagnostic> diagnostics = new ArrayList<>();
-        Map<String, ClassNode> targets = ClassFiles.readAll(originalSnapshot, diagnostics);
-        Map<String, ClassNode> mixins = ClassFiles.readAll(ClassFiles.snapshot(mixinClasses), diagnostics);
+        Map<String, ClassNode> targets = AnalysisClassReader.readAll(originalSnapshot, diagnostics);
+        Map<String, ClassNode> mixins = AnalysisClassReader.readAll(ClassFiles.snapshot(mixinClasses), diagnostics);
         ClassHierarchy hierarchy = new ClassHierarchy(targets, resources);
         List<Migration> migrations = new ArrayList<>();
         Set<MethodKey> claimed = new HashSet<>();
         Set<MethodKey> implementations = new HashSet<>();
         for (ClassNode mixin : mixins.values()) {
-            AnnotationNode mixinAnnotation = ClassFiles.annotation(mixin.invisibleAnnotations, ClassFiles.MIXIN);
+            AnnotationNode mixinAnnotation = ClassFiles.annotation(mixin.invisibleAnnotations, MixinAnnotations.MIXIN);
             if (mixinAnnotation == null) {
-                mixinAnnotation = ClassFiles.annotation(mixin.visibleAnnotations, ClassFiles.MIXIN);
+                mixinAnnotation = ClassFiles.annotation(mixin.visibleAnnotations, MixinAnnotations.MIXIN);
             }
             List<String> targetNames = targetNames(mixinAnnotation);
             for (MethodNode method : mixin.methods) {
-                AnnotationNode annotation = ClassFiles.annotation(method.visibleAnnotations, ClassFiles.TYPED_OVERWRITE);
+                AnnotationNode annotation = ClassFiles.annotation(method.visibleAnnotations, MixinAnnotations.TYPED_OVERWRITE);
                 if (annotation == null) {
                     continue;
                 }
@@ -70,7 +75,7 @@ public final class TypedOverwriteAnalyzer {
                     diagnostics.add(problem("MISSING_MIXIN_TARGET", location, "@Mixin must declare a target"));
                     continue;
                 }
-                if (ClassFiles.annotation(method.visibleAnnotations, ClassFiles.OVERWRITE) != null) {
+                if (ClassFiles.annotation(method.visibleAnnotations, MixinAnnotations.OVERWRITE) != null) {
                     diagnostics.add(problem("CONFLICTING_ANNOTATIONS", location, "@TypedOverwrite and @Overwrite are both present"));
                     continue;
                 }
@@ -97,7 +102,7 @@ public final class TypedOverwriteAnalyzer {
                     }
                     nativeOverwrite = false;
                     MethodKey targetKey = new MethodKey(target.name, original.name, original.desc);
-                    List<RepresentationMigration> representations = RepresentationRules.read(annotation, targetKey, method,
+                    List<RepresentationMigration> representations = RepresentationRuleReader.read(annotation, targetKey, method,
                             targets, mixins, hierarchy, diagnostics);
                     validateMigration(target, original, method, location, hierarchy, representations, diagnostics);
                     if (targetNames.size() > 1) {
@@ -114,7 +119,7 @@ public final class TypedOverwriteAnalyzer {
                     migrations.add(new Migration(originalKey, implementationKey, method.access, representations));
                 }
                 if (nativeOverwrite) {
-                    annotation.desc = ClassFiles.OVERWRITE;
+                    annotation.desc = MixinAnnotations.OVERWRITE;
                     removeValue(annotation, "method");
                     removeValue(annotation, "parameters");
                 } else if ((method.access & Opcodes.ACC_STATIC) != 0
@@ -124,7 +129,7 @@ public final class TypedOverwriteAnalyzer {
                 }
             }
         }
-        ClassFiles.throwIfErrors(diagnostics);
+        TypedOverwriteException.throwIfErrors(diagnostics);
         Map<String, byte[]> preparedMixins = new LinkedHashMap<>();
         mixins.forEach((name, node) -> preparedMixins.put(name, ClassFiles.write(node)));
         return new PreparedOverwrites(originalSnapshot, preparedMixins, migrations, resources);

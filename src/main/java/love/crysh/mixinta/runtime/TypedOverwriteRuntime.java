@@ -4,10 +4,7 @@ import love.crysh.mixinta.analysis.PreparedOverwrites;
 import love.crysh.mixinta.analysis.TypedOverwriteAnalyzer;
 import love.crysh.mixinta.bytecode.ClassByteSource;
 import love.crysh.mixinta.bytecode.ClassFiles;
-import love.crysh.mixinta.bytecode.ClassHierarchy;
-import love.crysh.mixinta.bytecode.MethodReferences;
-import net.fabricmc.loader.api.FabricLoader;
-import net.fabricmc.loader.api.metadata.CustomValue;
+
 import net.fabricmc.loader.impl.launch.FabricLauncherBase;
 import org.objectweb.asm.tree.ClassNode;
 import org.spongepowered.asm.mixin.MixinEnvironment;
@@ -16,8 +13,6 @@ import org.spongepowered.asm.mixin.transformer.IMixinTransformer;
 
 import java.io.IOException;
 import java.lang.reflect.InvocationTargetException;
-import java.nio.file.Files;
-import java.nio.file.Path;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
@@ -25,10 +20,6 @@ import java.util.LinkedHashSet;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.TimeUnit;
-import java.util.function.BiFunction;
-import java.util.function.UnaryOperator;
-import java.util.jar.JarFile;
 import java.util.logging.Logger;
 
 /** 一个 Knot ClassLoader 的显式分析域在首次定义前完成分析并整批发布。 */
@@ -62,7 +53,7 @@ public final class TypedOverwriteRuntime {
     private static volatile PreparedOverwrites prepared;
     private static Map<String, byte[]> analysisInputs = Map.of();
     private static Thread owner;
-    private static Class<?> agent;
+    private static AgentBootstrap.Connection agent;
     private static long definitionVersion;
     private static volatile boolean inputReady;
     private static MixinEnvironment batchEnvironment;
@@ -77,28 +68,15 @@ public final class TypedOverwriteRuntime {
             phase = Phase.BOOTSTRAPPING;
         }
         try {
-            for (var mod : FabricLoader.getInstance().getAllMods()) {
-                CustomValue metadata = mod.getMetadata().getCustomValue("mixinta");
-                if (metadata == null) continue;
-                register(metadata.getAsObject().get("classes"), PARTICIPANTS, mod.getMetadata().getId());
-                register(metadata.getAsObject().get("mixins"), MIXINS, mod.getMetadata().getId());
-            }
+            RuntimeDeclarations declarations = RuntimeDeclarations.read();
+            PARTICIPANTS.addAll(declarations.classes());
+            MIXINS.addAll(declarations.mixins());
             if (PARTICIPANTS.isEmpty() && MIXINS.isEmpty()) {
                 transition(Phase.INACTIVE);
                 return;
             }
-            Path jar = Path.of(TypedOverwriteRuntime.class.getProtectionDomain().getCodeSource().getLocation().toURI());
-            agent = attachAgent(jar);
-            if (Class.forName(ClassNode.class.getName(), false, agent.getClassLoader()) != ClassNode.class
-                    || Class.forName(MixinEnvironment.class.getName(), false, agent.getClassLoader()) != MixinEnvironment.class) {
-                throw fail("UNSHARED_TRANSFORMER_API", "ASM and Mixin must resolve to the same API classes");
-            }
-            UnaryOperator<Object> preparation = TypedOverwriteRuntime::prepareMixin;
-            BiFunction<ClassLoader, Object[], byte[]> publication = TypedOverwriteRuntime::publishedClass;
-            BiFunction<Object[], byte[], byte[]> cache = TypedOverwriteRuntime::beforeTransform;
-            agent.getMethod("connect", UnaryOperator.class, BiFunction.class, BiFunction.class)
-                    .invoke(null, preparation, publication, cache);
-            preloadSupport(jar);
+            agent = AgentBootstrap.connect(LOADER, TypedOverwriteRuntime::prepareMixin,
+                    TypedOverwriteRuntime::publishedClass, TypedOverwriteRuntime::beforeTransform, TypedOverwriteRuntime::fail);
             transition(Phase.BOOTSTRAPPED);
             LOG.fine("MixinTA bootstrap connected");
         } catch (Throwable cause) {
@@ -290,7 +268,7 @@ public final class TypedOverwriteRuntime {
     }
 
     private static void refreshExisting() throws ReflectiveOperationException {
-        for (Class<?> type : (Class<?>[]) agent.getMethod("loadedClasses", ClassLoader.class).invoke(null, LOADER)) {
+        for (Class<?> type : agent.loadedClasses(LOADER)) {
             EXISTING.put(type.getName().replace('.', '/'), type);
         }
     }
@@ -312,7 +290,10 @@ public final class TypedOverwriteRuntime {
                 observed = new HashMap<>(DEFINITION_INPUTS);
             }
             for (var entry : observed.entrySet()) {
-                if (!PARTICIPANTS.contains(entry.getKey())) checkRetiredReferences(snapshot, entry.getKey(), entry.getValue());
+                if (!PARTICIPANTS.contains(entry.getKey())) {
+                    RetiredMethodGuard.check(snapshot, entry.getKey(), entry.getValue(),
+                            TypedOverwriteRuntime::readDependency, TypedOverwriteRuntime::fail);
+                }
             }
         }
     }
@@ -342,38 +323,13 @@ public final class TypedOverwriteRuntime {
         }
         if (!PARTICIPANTS.contains(name)) {
             checkConfiguration();
-            checkRetiredReferences(snapshot, name, bytes);
+            RetiredMethodGuard.check(snapshot, name, bytes, TypedOverwriteRuntime::readDependency, TypedOverwriteRuntime::fail);
             return null;
         }
         checkFailure();
         if (!Arrays.equals(snapshot.afterMixins().get(name), bytes)) throw fail("POST_MIXIN_INPUT_CHANGED", name);
         LOG.fine("MixinTA verified definition input " + name);
         return snapshot.outputs().get(name).clone();
-    }
-
-    private static void checkRetiredReferences(RuntimeSnapshot snapshot, String name, byte[] bytes) {
-        if (snapshot.retiredMethods().isEmpty() || name.startsWith("love/crysh/mixinta/")) return;
-        ClassNode node = ClassFiles.read(bytes);
-        Map<String, ClassNode> nodes = new HashMap<>();
-        snapshot.afterMixins().forEach((key, value) -> nodes.put(key, ClassFiles.read(value)));
-        nodes.put(name, node);
-        ClassHierarchy hierarchy = new ClassHierarchy(nodes, (ClassByteSource) TypedOverwriteRuntime::readDependency);
-        for (var method : node.methods) {
-            MethodReferences.visit(method, (instruction, reference) -> {
-                boolean candidate = snapshot.retiredMethods().stream().anyMatch(retired ->
-                        retired.name().equals(reference.name()) && retired.descriptor().equals(reference.descriptor()));
-                if (!candidate) return;
-                try {
-                    var resolved = hierarchy.resolve(reference.owner(), reference.name(), reference.descriptor());
-                    if (snapshot.retiredMethods().contains(resolved)) {
-                        throw fail("LATE_OLD_DESCRIPTOR", name + "." + method.name + method.desc
-                                + " instruction=" + instruction + " -> " + reference);
-                    }
-                } catch (IllegalArgumentException missing) {
-                    throw fail("UNRESOLVED_LATE_REFERENCE", reference + " " + missing.getMessage());
-                }
-            });
-        }
     }
 
     private static byte[] readInput(String name) throws IOException {
@@ -421,39 +377,6 @@ public final class TypedOverwriteRuntime {
         } catch (IOException missing) {
             throw fail("INPUT_UNAVAILABLE", missing.getMessage());
         }
-    }
-
-    private static void register(CustomValue values, Set<String> destination, String mod) {
-        if (values == null) throw new IllegalArgumentException("mixinta metadata requires classes and mixins arrays in " + mod);
-        for (CustomValue value : values.getAsArray()) destination.add(value.getAsString().replace('.', '/'));
-    }
-
-    private static void preloadSupport(Path jar) throws Exception {
-        try (JarFile archive = new JarFile(jar.toFile())) {
-            for (var entry : archive.stream().filter(value -> value.getName().endsWith(".class")
-                    && value.getName().startsWith("love/crysh/mixinta/")
-                    && !value.getName().startsWith("love/crysh/mixinta/runtime/agent/")).toList()) {
-                Class.forName(entry.getName().substring(0, entry.getName().length() - 6).replace('/', '.'), false, LOADER);
-            }
-        }
-    }
-
-    private static Class<?> attachAgent(Path jar) throws Exception {
-        if (!Files.isRegularFile(jar)) throw new IllegalStateException("MixinTA must be loaded from a packaged JAR: " + jar);
-        String executable = System.getProperty("os.name").startsWith("Windows") ? "java.exe" : "java";
-        Process helper = new ProcessBuilder(Path.of(System.getProperty("java.home"), "bin", executable).toString(),
-                "--add-modules=jdk.attach", "-cp", jar.toString(), "love.crysh.mixinta.runtime.agent.AgentAttacher",
-                Long.toString(ProcessHandle.current().pid()), jar.toString()).inheritIO().start();
-        try {
-            if (!helper.waitFor(30, TimeUnit.SECONDS)) throw new IllegalStateException("MixinTA agent attachment timed out");
-            if (helper.exitValue() != 0) throw new IllegalStateException("MixinTA agent attachment failed: " + helper.exitValue());
-        } catch (InterruptedException interrupted) {
-            Thread.currentThread().interrupt();
-            throw interrupted;
-        } finally {
-            if (helper.isAlive()) helper.destroyForcibly();
-        }
-        return Class.forName("love.crysh.mixinta.runtime.agent.RuntimeAgent", true, ClassLoader.getSystemClassLoader());
     }
 
     private static void transition(Phase next) {

@@ -1,25 +1,16 @@
 package love.crysh.mixinta.bytecode;
 
-import love.crysh.mixinta.diagnostic.Diagnostic;
-import love.crysh.mixinta.diagnostic.TypedOverwriteException;
-
 import org.objectweb.asm.ClassReader;
 import org.objectweb.asm.ClassWriter;
 import org.objectweb.asm.tree.AnnotationNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.MethodNode;
 
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.TreeMap;
 
 public final class ClassFiles {
-    public static final String TYPED_OVERWRITE = "Llove/crysh/mixinta/anno/TypedOverwrite;";
-    public static final String OVERWRITE = "Lorg/spongepowered/asm/mixin/Overwrite;";
-    public static final String MIXIN = "Lorg/spongepowered/asm/mixin/Mixin;";
-    public static final String FINAL = "Lorg/spongepowered/asm/mixin/Final;";
-    public static final String MERGED = "Lorg/spongepowered/asm/mixin/transformer/meta/MixinMerged;";
 
     private ClassFiles() {
     }
@@ -34,24 +25,6 @@ public final class ClassFiles {
         ClassNode node = new ClassNode();
         new ClassReader(bytes).accept(node, 0);
         return node;
-    }
-
-    public static Map<String, ClassNode> readAll(Map<String, byte[]> classes, List<Diagnostic> diagnostics) {
-        Map<String, ClassNode> nodes = new LinkedHashMap<>();
-        classes.forEach((name, bytes) -> {
-            try {
-                ClassNode node = read(bytes);
-                if (!name.equals(node.name)) {
-                    diagnostics.add(new Diagnostic("CLASS_NAME_MISMATCH", null, -1, -1,
-                            name + " contains " + node.name));
-                } else {
-                    nodes.put(name, node);
-                }
-            } catch (RuntimeException failure) {
-                diagnostics.add(new Diagnostic("INVALID_CLASS", null, -1, -1, name + " " + failure.getMessage()));
-            }
-        });
-        return nodes;
     }
 
     public static MethodNode findMethod(ClassNode owner, String name, String descriptor) {
@@ -85,9 +58,4 @@ public final class ClassFiles {
         return writer.toByteArray();
     }
 
-    public static void throwIfErrors(List<Diagnostic> diagnostics) {
-        if (!diagnostics.isEmpty()) {
-            throw new TypedOverwriteException(diagnostics);
-        }
-    }
 }

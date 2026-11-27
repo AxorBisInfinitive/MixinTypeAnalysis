@@ -1,28 +1,28 @@
 package love.crysh.mixinta.analysis;
 
-import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.analysis.container.ContainerContract;
+import love.crysh.mixinta.analysis.declaration.ContainerRuleReader;
+import love.crysh.mixinta.analysis.declaration.Migration;
+import love.crysh.mixinta.analysis.declaration.MixinAnnotations;
+import love.crysh.mixinta.analysis.declaration.RepresentationMigration;
+import love.crysh.mixinta.analysis.declaration.RepresentationRuleReader;
+import love.crysh.mixinta.analysis.plan.CallSite;
+import love.crysh.mixinta.analysis.plan.RepresentationPlan;
+import love.crysh.mixinta.analysis.representation.RepresentationBatch;
 import love.crysh.mixinta.bytecode.ClassByteSource;
-import love.crysh.mixinta.bytecode.MethodReferences;
+import love.crysh.mixinta.bytecode.ClassFiles;
 import love.crysh.mixinta.bytecode.ClassHierarchy;
-import love.crysh.mixinta.bytecode.PrimitiveConversions;
 import love.crysh.mixinta.diagnostic.Diagnostic;
+import love.crysh.mixinta.diagnostic.TypedOverwriteException;
 import love.crysh.mixinta.model.MethodKey;
 
 import org.objectweb.asm.Opcodes;
-import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.ClassNode;
 import org.objectweb.asm.tree.FrameNode;
-import org.objectweb.asm.tree.InvokeDynamicInsnNode;
-import org.objectweb.asm.tree.LdcInsnNode;
 import org.objectweb.asm.tree.LineNumberNode;
 import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
-import org.objectweb.asm.tree.analysis.Analyzer;
-import org.objectweb.asm.tree.analysis.AnalyzerException;
-import org.objectweb.asm.tree.analysis.BasicInterpreter;
-import org.objectweb.asm.tree.analysis.BasicValue;
-import org.objectweb.asm.tree.analysis.Frame;
 
 import java.util.ArrayList;
 import java.util.Arrays;
@@ -56,8 +56,8 @@ public final class PreparedOverwrites {
     public TransformationPlan analyze(Map<String, byte[]> afterMixins) {
         Map<String, byte[]> snapshot = ClassFiles.snapshot(afterMixins);
         List<Diagnostic> diagnostics = new ArrayList<>();
-        Map<String, ClassNode> nodes = ClassFiles.readAll(snapshot, diagnostics);
-        Map<String, ClassNode> originalNodes = ClassFiles.readAll(originals, diagnostics);
+        Map<String, ClassNode> nodes = AnalysisClassReader.readAll(snapshot, diagnostics);
+        Map<String, ClassNode> originalNodes = AnalysisClassReader.readAll(originals, diagnostics);
         for (String name : originals.keySet()) {
             if (!nodes.containsKey(name)) {
                 diagnostics.add(new Diagnostic("MISSING_INPUT_CLASS", null, -1, -1, name));
@@ -70,13 +70,13 @@ public final class PreparedOverwrites {
         Map<MethodKey, Migration> referenceTargets = new HashMap<>();
         migrations.stream().filter(migration -> !migration.representations().isEmpty())
                 .forEach(migration -> referenceTargets.put(migration.original(), migration));
-        Map<MethodKey, ContainerRules.Definition> containerContracts = new HashMap<>();
+        Map<MethodKey, ContainerContract> containerContracts = new HashMap<>();
         for (Migration migration : migrations) {
             for (RepresentationMigration representation : migration.representations()) {
-                for (ContainerRules.Definition definition : representation.containers()) {
+                for (ContainerContract definition : representation.containers()) {
                     try {
-                        ContainerRules.validate(definition.method(), definition.summary(), outputHierarchy);
-                        ContainerRules.Definition previous = containerContracts.putIfAbsent(definition.method(), definition);
+                        ContainerRuleReader.validate(definition.method(), definition.summary(), outputHierarchy);
+                        ContainerContract previous = containerContracts.putIfAbsent(definition.method(), definition);
                         if (previous != null && !previous.equals(definition)) {
                             throw new IllegalArgumentException("Conflicting container contracts " + previous.id() + " and " + definition.id());
                         }
@@ -91,13 +91,13 @@ public final class PreparedOverwrites {
                 }
             }
         }
-        for (ContainerRules.Definition definition : containerContracts.values()) {
+        for (ContainerContract definition : containerContracts.values()) {
             ClassNode owner = nodes.get(definition.method().owner());
             MethodNode method = owner == null ? null : ClassFiles.findMethod(owner, definition.method().name(), definition.method().descriptor());
             if (method == null) continue;
             for (AbstractInsnNode instruction : method.instructions) {
                 if (!(instruction instanceof MethodInsnNode call)) continue;
-                Migration migration = findMigration(call.owner, call.name, call.desc, referenceTargets,
+                Migration migration = PrimitiveCallAnalyzer.findMigration(call.owner, call.name, call.desc, referenceTargets,
                         outputHierarchy, definition.method(), -1, diagnostics);
                 if (migration != null) {
                     diagnostics.add(new Diagnostic("CONTAINER_RULE_CONFLICT", definition.method(), -1, -1,
@@ -105,7 +105,7 @@ public final class PreparedOverwrites {
                 }
             }
         }
-        ClassFiles.throwIfErrors(diagnostics);
+        TypedOverwriteException.throwIfErrors(diagnostics);
         Map<MethodKey, Migration> byTarget = new HashMap<>();
         List<RepresentationMigration> representations = new ArrayList<>();
         for (Migration migration : migrations) {
@@ -113,13 +113,17 @@ public final class PreparedOverwrites {
             validateMergedMethods(migration, nodes, originalNodes, diagnostics);
             if (!migration.representations().isEmpty()) {
                 List<RepresentationMigration> resolved = migration.representations().stream()
-                        .map(value -> RepresentationRules.resolve(value, nodes, diagnostics)).toList();
+                        .map(value -> RepresentationRuleReader.resolve(value, nodes, diagnostics)).toList();
                 representations.addAll(resolved);
             }
         }
-        ClassFiles.throwIfErrors(diagnostics);
-        List<RepresentationPlan> representationPlans = representations.isEmpty() ? List.of()
-                : List.of(RepresentationBatch.analyze(representations, nodes, byTarget, hierarchy, diagnostics));
+        TypedOverwriteException.throwIfErrors(diagnostics);
+        List<RepresentationPlan> representationPlans = new ArrayList<>();
+        if (!representations.isEmpty()) {
+            var batch = RepresentationBatch.analyze(representations, nodes, byTarget, hierarchy);
+            diagnostics.addAll(batch.diagnostics());
+            batch.plan().ifPresent(representationPlans::add);
+        }
         Set<MethodKey> replacedMethods = byTarget.keySet();
         List<CallSite> calls = new ArrayList<>();
         for (ClassNode node : nodes.values()) {
@@ -128,10 +132,10 @@ public final class PreparedOverwrites {
                 if (replacedMethods.contains(caller)) {
                     continue;
                 }
-                analyzeMethod(caller, method, byTarget, hierarchy, calls, diagnostics);
+                PrimitiveCallAnalyzer.analyzeMethod(caller, method, byTarget, hierarchy, calls, diagnostics);
             }
         }
-        ClassFiles.throwIfErrors(diagnostics);
+        TypedOverwriteException.throwIfErrors(diagnostics);
         return new TransformationPlan(snapshot, migrations, calls, representationPlans, resources);
     }
 
@@ -149,106 +153,19 @@ public final class PreparedOverwrites {
             diagnostics.add(problem("ORIGINAL_METHOD_MISSING", key, -1, "Original method is absent after Mixin processing"));
         } else {
             MethodNode baseline = ClassFiles.findMethod(originalNodes.get(key.owner()), key.name(), key.descriptor());
-            if (ClassFiles.annotation(original.visibleAnnotations, ClassFiles.FINAL) != null) {
+            if (ClassFiles.annotation(original.visibleAnnotations, MixinAnnotations.FINAL) != null) {
                 diagnostics.add(problem("FINAL_TARGET", key, -1, "Parameter migration conflicts with @Final"));
             }
-            if (ClassFiles.annotation(original.visibleAnnotations, ClassFiles.MERGED) != null
+            if (ClassFiles.annotation(original.visibleAnnotations, MixinAnnotations.MERGED) != null
                     || !Arrays.equals(body(baseline), body(original))) {
                 diagnostics.add(problem("TARGET_CHANGED_AFTER_PREPARATION", key, -1,
                         "The original method was modified before parameter migration"));
             }
         }
         if (implementation == null
-                || ClassFiles.annotation(implementation.visibleAnnotations, ClassFiles.TYPED_OVERWRITE) == null) {
+                || ClassFiles.annotation(implementation.visibleAnnotations, MixinAnnotations.TYPED_OVERWRITE) == null) {
             diagnostics.add(problem("IMPLEMENTATION_MISSING", implementationKey, -1,
                     "The prepared typed implementation must be merged before analysis"));
-        }
-    }
-
-    private void analyzeMethod(MethodKey caller, MethodNode method, Map<MethodKey, Migration> migrations,
-            ClassHierarchy hierarchy, List<CallSite> calls, List<Diagnostic> diagnostics) {
-        List<CallSite> methodCalls = new ArrayList<>();
-        AbstractInsnNode[] instructions = method.instructions.toArray();
-        for (int index = 0; index < instructions.length; index++) {
-            AbstractInsnNode instruction = instructions[index];
-            if (instruction instanceof MethodInsnNode invocation) {
-                Migration migration = findMigration(invocation.owner, invocation.name, invocation.desc,
-                        migrations, hierarchy, caller, index, diagnostics);
-                if (migration != null && migration.representations().isEmpty()) {
-                    methodCalls.add(new CallSite(caller, index, migration));
-                }
-            } else if (instruction instanceof LdcInsnNode constant) {
-                checkConstant(constant.cst, migrations, hierarchy, caller, index, diagnostics);
-            } else if (instruction instanceof InvokeDynamicInsnNode dynamic) {
-                checkConstant(dynamic.bsm, migrations, hierarchy, caller, index, diagnostics);
-                for (Object argument : dynamic.bsmArgs) {
-                    checkConstant(argument, migrations, hierarchy, caller, index, diagnostics);
-                }
-            }
-        }
-        if (methodCalls.isEmpty()) {
-            return;
-        }
-        Frame<BasicValue>[] frames;
-        try {
-            frames = new Analyzer<>(new BasicInterpreter()).analyze(caller.owner(), method);
-        } catch (AnalyzerException | RuntimeException failure) {
-            diagnostics.add(problem("INVALID_CALLER_BYTECODE", caller, -1, failure.getMessage()));
-            return;
-        }
-        for (CallSite call : methodCalls) {
-            validateArguments(call, method, frames[call.instruction()], diagnostics);
-        }
-        calls.addAll(methodCalls);
-    }
-
-    private void validateArguments(CallSite call, MethodNode caller, Frame<BasicValue> frame, List<Diagnostic> diagnostics) {
-        Type[] parameters = Type.getArgumentTypes(call.migration().original().descriptor());
-        int temporarySlots = Arrays.stream(parameters).mapToInt(Type::getSize).sum();
-        if (caller.maxLocals + temporarySlots > 65535) {
-            diagnostics.add(problem("LOCAL_VARIABLE_LIMIT", call.caller(), call.instruction(), "Argument temporaries exceed max_locals"));
-        }
-        if (frame == null) {
-            return;
-        }
-        if (frame.getStackSize() < parameters.length) {
-            diagnostics.add(problem("INVALID_ARGUMENT_STACK", call.caller(), call.instruction(), "Argument stack is incomplete"));
-            return;
-        }
-        int start = frame.getStackSize() - parameters.length;
-        for (int index = 0; index < parameters.length; index++) {
-            Type actual = frame.getStack(start + index).getType();
-            if (actual == null || PrimitiveConversions.computationalSort(actual)
-                    != PrimitiveConversions.computationalSort(parameters[index])) {
-                diagnostics.add(new Diagnostic("ARGUMENT_TYPE_MISMATCH", call.caller(), call.instruction(), index,
-                        String.valueOf(actual) + " expected " + parameters[index]));
-            }
-        }
-    }
-
-    private void checkConstant(Object constant, Map<MethodKey, Migration> migrations, ClassHierarchy hierarchy,
-            MethodKey caller, int instruction, List<Diagnostic> diagnostics) {
-        MethodReferences.visitConstant(constant, handle -> {
-            Migration migration = findMigration(handle.getOwner(), handle.getName(), handle.getDesc(),
-                    migrations, hierarchy, caller, instruction, diagnostics);
-            if (migration != null) {
-                diagnostics.add(problem("METHOD_HANDLE_NOT_IMPLEMENTED", caller, instruction, migration.original().toString()));
-            }
-        });
-    }
-
-    private Migration findMigration(String owner, String name, String descriptor, Map<MethodKey, Migration> migrations,
-            ClassHierarchy hierarchy, MethodKey caller, int instruction, List<Diagnostic> diagnostics) {
-        boolean candidate = migrations.keySet().stream().anyMatch(key -> key.name().equals(name) && key.descriptor().equals(descriptor));
-        if (!candidate) {
-            return null;
-        }
-        try {
-            MethodKey resolved = hierarchy.resolve(owner, name, descriptor);
-            return migrations.get(resolved);
-        } catch (IllegalArgumentException failure) {
-            diagnostics.add(problem("MISSING_HIERARCHY", caller, instruction, failure.getMessage()));
-            return null;
         }
     }
 

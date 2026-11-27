@@ -1,8 +1,11 @@
 package love.crysh.mixinta.analysis;
 
+import love.crysh.mixinta.analysis.container.ContainerSummary;
+import love.crysh.mixinta.analysis.container.JdkContainerSummaries;
 import love.crysh.mixinta.bytecode.ClassFiles;
 import love.crysh.mixinta.bytecode.ClassHierarchy;
 import love.crysh.mixinta.diagnostic.Diagnostic;
+import love.crysh.mixinta.diagnostic.TypedOverwriteException;
 import love.crysh.mixinta.model.MethodKey;
 
 import org.objectweb.asm.ConstantDynamic;
@@ -129,7 +132,7 @@ final class RepresentationPropagationExperiment {
 
     private RepresentationPropagationExperiment(Map<String, byte[]> input, Rules rules) {
         this.rules = rules;
-        this.classes = ClassFiles.readAll(ClassFiles.snapshot(input), diagnostics);
+        this.classes = AnalysisClassReader.readAll(ClassFiles.snapshot(input), diagnostics);
         this.representation = Type.getArgumentTypes(rules.implementation.descriptor())[0];
     }
 
@@ -139,9 +142,9 @@ final class RepresentationPropagationExperiment {
 
     private Result run() {
         validateRules();
-        ClassFiles.throwIfErrors(diagnostics);
+        TypedOverwriteException.throwIfErrors(diagnostics);
         analyzeMethods();
-        ClassFiles.throwIfErrors(diagnostics);
+        TypedOverwriteException.throwIfErrors(diagnostics);
         seedTargets();
         int previous;
         do {
@@ -151,7 +154,7 @@ final class RepresentationPropagationExperiment {
             unifyLocalMerges();
         } while (!pending.isEmpty() || previous != requested.size() + storages.size());
         validateUses();
-        ClassFiles.throwIfErrors(diagnostics);
+        TypedOverwriteException.throwIfErrors(diagnostics);
         for (Flow flow : flows) {
             rewrite(flow);
         }
@@ -311,7 +314,7 @@ final class RepresentationPropagationExperiment {
     private void requireStorage(SourceValue value, String path) {
         for (AbstractInsnNode origin : ordered(value.insns)) {
             if (origin instanceof TypeInsnNode allocation && allocation.getOpcode() == Opcodes.NEW
-                    && ContainerSummary.supportsAllocation(allocation.desc)) {
+                    && JdkContainerSummaries.supportsAllocation(allocation.desc)) {
                 if (storages.add(origin)) {
                     paths.put(origin, path);
                 }
@@ -333,7 +336,7 @@ final class RepresentationPropagationExperiment {
                     continue;
                 }
                 String path = storagePath(receiver) + " <- " + call.name + " at " + new Site(flow, index).describe();
-                ContainerSummary summary = ContainerSummary.resolve(call);
+                ContainerSummary summary = JdkContainerSummaries.resolve(call);
                 if (summary == null) {
                     continue;
                 }
@@ -436,7 +439,7 @@ final class RepresentationPropagationExperiment {
         Flow flow = site.flow;
         int index = site.index;
         boolean receiverPresent = call.getOpcode() != Opcodes.INVOKESTATIC;
-        if (receiverPresent && touches(flow.receiver(index, call), storages) && ContainerSummary.resolve(call) == null) {
+        if (receiverPresent && touches(flow.receiver(index, call), storages) && JdkContainerSummaries.resolve(call) == null) {
             problem("UNKNOWN_CONTAINER_USE", site, storagePath(flow.receiver(index, call)) + " <- " + symbol(call));
         }
         if (receiverPresent && touches(flow.receiver(index, call), migrated)
@@ -453,7 +456,7 @@ final class RepresentationPropagationExperiment {
                 continue;
             }
             if (is(call, rules.target) || isBox(call) && migrated.contains(call)
-                    || isContainerWrite(call) && ContainerSummary.resolve(call).elementParameter() == parameter
+                    || isContainerWrite(call) && JdkContainerSummaries.resolve(call).elementParameter() == parameter
                     && touches(flow.receiver(index, call), storages)) {
                 continue;
             }
@@ -627,7 +630,7 @@ final class RepresentationPropagationExperiment {
                 diagnostics.add(new Diagnostic("EXPERIMENT_OUTPUT_INVALID", null, -1, -1, node.name + " " + failure.getMessage()));
             }
         }
-        ClassFiles.throwIfErrors(diagnostics);
+        TypedOverwriteException.throwIfErrors(diagnostics);
         return output;
     }
 
@@ -645,12 +648,12 @@ final class RepresentationPropagationExperiment {
     }
 
     private static boolean isContainerWrite(MethodInsnNode call) {
-        ContainerSummary summary = ContainerSummary.resolve(call);
+        ContainerSummary summary = JdkContainerSummaries.resolve(call);
         return summary != null && summary.writesElement();
     }
 
     private static boolean isContainerRead(MethodInsnNode call) {
-        ContainerSummary summary = ContainerSummary.resolve(call);
+        ContainerSummary summary = JdkContainerSummaries.resolve(call);
         return summary != null && summary.readsElement();
     }
 

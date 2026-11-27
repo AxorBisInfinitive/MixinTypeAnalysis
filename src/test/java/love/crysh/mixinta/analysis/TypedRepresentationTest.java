@@ -12,7 +12,7 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class TypedRepresentationTest {
     @Test
-    void preparesAndAppliesReferenceRepresentationRules() throws Exception {
+    void preparesAndAppliesReferenceRepresentationRuleReader() throws Exception {
         Map<String, String> sources = new LinkedHashMap<>();
         sources.put("sample.BlockPos", "package sample; public record BlockPos(long value) { public long asLong(){return value;} }");
         sources.put("sample.Subject", "package sample; public final class Subject { public static int lookup(long value){return (int)value;} public static int run(long value){return lookup(new BlockPos(value).asLong());} }");

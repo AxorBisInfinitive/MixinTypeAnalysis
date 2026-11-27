@@ -185,6 +185,83 @@ class RuntimeInitializationIT {
         result.contains("INTRODUCED=25", "COUNTS=1/1/1 ANALYSES=1");
     }
 
+    @ParameterizedTest
+    @ValueSource(strings = {"fresh", "generic", "early", "reassigned"})
+    void publishesLocalMetadataAndChecksItsOwnerBeforePublication(String scenario) throws Exception {
+        boolean generic = scenario.equals("generic");
+        String body = scenario.equals("reassigned") ? """
+                java.util.Queue<Long> queue = new java.util.ArrayDeque<>(); queue.add(new BlockPos(6).asLong());
+                int first = Subject.lookup(Forwarder.pass(queue).poll());
+                queue = new java.util.ArrayDeque<>(); queue.add(new BlockPos(6).asLong());
+                return first + Subject.lookup(Forwarder.pass(queue).poll());
+                """ : """
+                java.util.Queue<Long> queue = new java.util.ArrayDeque<>();
+                queue.add(new BlockPos(12).asLong());
+                return Subject.lookup(Forwarder.pass(queue).poll());
+                """;
+        Map<String, String> sources = Map.of(
+                SUBJECT, "package fixture.business; public final class Subject { public static int lookup(long pos) { return (int)pos; } }",
+                CALLER, "package fixture.business; public class Caller { public static int run() {" + body + "} }",
+                "fixture.business.BlockPos", "package fixture.business; public record BlockPos(long value) { public long asLong() { return value; } }",
+                "fixture.business.Forwarder", "package fixture.business; public class Forwarder { " + (generic
+                        ? "public static <T> java.util.Queue<T> pass(java.util.Queue<T> queue) { return queue; }"
+                        : "public static java.util.Queue<Long> pass(java.util.Queue<Long> queue) { return queue; }") + " }",
+                "fixture.mixin.SubjectMixin", """
+                        package fixture.mixin;
+                        @org.spongepowered.asm.mixin.Mixin(targets="fixture.business.Subject", remap=false)
+                        public class SubjectMixin {
+                            @love.crysh.mixinta.anno.TypedOverwrite(method="lookup(J)I",
+                                    parameters=@love.crysh.mixinta.anno.ParameterMigration(parameter=0, rules=SubjectMixin.class))
+                            public static int lookup(fixture.business.BlockPos value) { return (int)value.value(); }
+                            @love.crysh.mixinta.anno.TypeRule(value=love.crysh.mixinta.anno.TypeRule.Kind.SOURCE,
+                                    method="fixture/business/BlockPos.asLong()J")
+                            private static fixture.business.BlockPos keep(fixture.business.BlockPos value) { return value; }
+                            @love.crysh.mixinta.anno.TypeRule(love.crysh.mixinta.anno.TypeRule.Kind.READ)
+                            private static fixture.business.BlockPos read(fixture.business.BlockPos value) { return java.util.Objects.requireNonNull(value); }
+                        }
+                        """);
+        Result result = launch("local-metadata-" + scenario, """
+                var field = love.crysh.mixinta.runtime.TypedOverwriteRuntime.class.getDeclaredField("result");
+                field.setAccessible(true);
+                var snapshot = field.get(null);
+                field = snapshot.getClass().getDeclaredField("modifiedClasses");
+                field.setAccessible(true);
+                var modified = (java.util.Set<String>) field.get(snapshot);
+                if (modified.contains("fixture/business/Forwarder") != %s) throw new AssertionError(modified);
+                field = snapshot.getClass().getDeclaredField("outputs");
+                field.setAccessible(true);
+                var outputs = (java.util.Map<String, byte[]>) field.get(snapshot);
+                var node = new org.objectweb.asm.tree.ClassNode();
+                new org.objectweb.asm.ClassReader(outputs.get("fixture/business/Forwarder")).accept(node, 0);
+                var pass = node.methods.stream().filter(method -> method.name.equals("pass")).findFirst().orElseThrow();
+                if (!pass.localVariables.getFirst().signature.equals("%s")) throw new AssertionError(pass.localVariables.getFirst().signature);
+                if (%s) {
+                    node = new org.objectweb.asm.tree.ClassNode();
+                    new org.objectweb.asm.ClassReader(outputs.get("fixture/business/Caller")).accept(node, 0);
+                    var run = node.methods.stream().filter(method -> method.name.equals("run")).findFirst().orElseThrow();
+                    var bridges = java.util.Arrays.stream(run.instructions.toArray())
+                            .filter(instruction -> instruction instanceof org.objectweb.asm.tree.MethodInsnNode call && call.name.startsWith("mixinta$rule$"))
+                            .map(instruction -> ((org.objectweb.asm.tree.MethodInsnNode)instruction).name)
+                            .collect(java.util.stream.Collectors.groupingBy(name -> name, java.util.stream.Collectors.counting()));
+                    if (bridges.size() != 2 || bridges.values().stream().anyMatch(count -> count != 2L)) throw new AssertionError(bridges);
+                    var queue = run.localVariables.stream().filter(local -> local.name.equals("queue")).findFirst().orElseThrow();
+                    if (!queue.signature.equals("Ljava/util/Queue<Lfixture/business/BlockPos;>;")) throw new AssertionError(queue.signature);
+                    System.out.println("REUSED_RULE_BRIDGES_VERIFIED");
+                }
+                System.out.println("LOCAL_METADATA_VERIFIED");
+                """.formatted(!generic, generic ? "Ljava/util/Queue<TT;>;" : "Ljava/util/Queue<Lfixture/business/BlockPos;>;", scenario.equals("reassigned")),
+                sources, List.of(), false,
+                scenario.equals("early") ? List.of("-Dprobe.earlyClass=fixture.business.Forwarder") : List.of());
+        if (scenario.equals("early")) {
+            result.failureBeforeBusiness("EARLY_DEFINED=fixture.business.Forwarder", "EARLY_MODIFIED_CLASS fixture/business/Forwarder");
+            assertFalse(result.log().contains("BATCH_READY"), result.log());
+        } else {
+            result.success();
+            result.contains("RESULT=12", "LOCAL_METADATA_VERIFIED", "COUNTS=1/1/1 ANALYSES=1");
+            if (scenario.equals("reassigned")) result.contains("REUSED_RULE_BRIDGES_VERIFIED");
+        }
+    }
+
     @Test
     void permitsAnAlreadyDefinedReadOnlyClassInsideTheCandidateDomain() throws Exception {
         Result result = launch("read-only", """
@@ -400,7 +477,7 @@ class RuntimeInitializationIT {
         result.failure("LATE_OLD_DESCRIPTOR fixture/late/LateCaller.call", "FAILURE_RETAINED OUTPUTS_PUBLISHED",
                 "AGENT_ERROR_LOG_VERIFIED=MixinTA class transformation failed for fixture/late/LateCaller",
                 "java.lang.IllegalStateException: MixinTA initialization failed",
-                "TypedOverwriteRuntime.checkRetiredReferences", "java.lang.ClassFormatError");
+                "RetiredMethodGuard.check", "java.lang.ClassFormatError");
         if (failingLogger) result.contains("AGENT_LOGGER_FAILURE");
         assertFalse(result.log().contains("NoSuchMethodError"), result.log());
     }
@@ -645,7 +722,7 @@ class RuntimeInitializationIT {
     }
 
     private static void compile(Path root, Path classes, Map<String, String> sources) throws IOException {
-        List<String> arguments = new ArrayList<>(List.of("--release", "25", "-proc:none", "-encoding", "UTF-8",
+        List<String> arguments = new ArrayList<>(List.of("--release", "25", "-g", "-proc:none", "-encoding", "UTF-8",
                 "-d", classes.toString(), "-classpath", System.getProperty("java.class.path")));
         for (var entry : sources.entrySet()) {
             Path source = root.resolve("sources").resolve(entry.getKey().replace('.', '/') + ".java");

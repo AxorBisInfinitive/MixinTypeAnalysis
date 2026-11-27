@@ -2,6 +2,7 @@ package love.crysh.mixinta.testsupport;
 
 import love.crysh.mixinta.analysis.PreparedOverwrites;
 import love.crysh.mixinta.analysis.TypedOverwriteAnalyzer;
+import love.crysh.mixinta.analysis.declaration.MixinAnnotations;
 import love.crysh.mixinta.bytecode.ClassFiles;
 
 import org.objectweb.asm.ClassReader;
@@ -12,13 +13,6 @@ import org.objectweb.asm.tree.MethodInsnNode;
 import org.objectweb.asm.tree.MethodNode;
 import org.objectweb.asm.util.CheckClassAdapter;
 
-import javax.tools.DiagnosticCollector;
-import javax.tools.FileObject;
-import javax.tools.ForwardingJavaFileManager;
-import javax.tools.JavaFileObject;
-import javax.tools.SimpleJavaFileObject;
-import javax.tools.StandardJavaFileManager;
-import javax.tools.ToolProvider;
 import java.io.ByteArrayOutputStream;
 import java.io.IOException;
 import java.io.OutputStream;
@@ -29,6 +23,13 @@ import java.util.ArrayList;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import javax.tools.DiagnosticCollector;
+import javax.tools.FileObject;
+import javax.tools.ForwardingJavaFileManager;
+import javax.tools.JavaFileObject;
+import javax.tools.SimpleJavaFileObject;
+import javax.tools.StandardJavaFileManager;
+import javax.tools.ToolProvider;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 
@@ -98,7 +99,7 @@ public final class BytecodeFixtures {
         Map<String, byte[]> mixins = new LinkedHashMap<>();
         classes.forEach((name, bytes) -> {
             ClassNode node = ClassFiles.read(bytes);
-            if (ClassFiles.annotation(node.invisibleAnnotations, ClassFiles.MIXIN) == null) {
+            if (ClassFiles.annotation(node.invisibleAnnotations, MixinAnnotations.MIXIN) == null) {
                 originals.put(name, bytes);
             } else {
                 mixins.put(name, bytes);
@@ -112,7 +113,7 @@ public final class BytecodeFixtures {
         Map<String, byte[]> classes = ClassFiles.snapshot(fixture.originals());
         for (byte[] bytes : preparation.mixins().values()) {
             ClassNode mixin = ClassFiles.read(bytes);
-            var annotation = ClassFiles.annotation(mixin.invisibleAnnotations, ClassFiles.MIXIN);
+            var annotation = ClassFiles.annotation(mixin.invisibleAnnotations, MixinAnnotations.MIXIN);
             var targets = (List<?>) ClassFiles.value(annotation, "value", List.of());
             String owner = targets.isEmpty()
                     ? ((List<?>) ClassFiles.value(annotation, "targets", List.of())).getFirst().toString().replace('.', '/')

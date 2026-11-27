@@ -1,5 +1,6 @@
 package love.crysh.mixinta.analysis;
 
+import love.crysh.mixinta.analysis.declaration.MixinAnnotations;
 import love.crysh.mixinta.bytecode.ClassFiles;
 import love.crysh.mixinta.diagnostic.Diagnostic;
 import love.crysh.mixinta.diagnostic.TypedOverwriteException;
@@ -245,7 +246,7 @@ class TypedBatchBoundaryTest {
         var third = new org.objectweb.asm.tree.MethodNode(first.access, "third", first.desc, first.signature,
                 first.exceptions.toArray(String[]::new));
         first.accept(third);
-        third.visibleAnnotations.stream().filter(annotation -> annotation.desc.equals(ClassFiles.TYPED_OVERWRITE))
+        third.visibleAnnotations.stream().filter(annotation -> annotation.desc.equals(MixinAnnotations.TYPED_OVERWRITE))
                 .forEach(annotation -> {
                     for (int index = 0; index < annotation.values.size(); index += 2) {
                         if (annotation.values.get(index).equals("method")) annotation.values.set(index + 1, "third(J)I");

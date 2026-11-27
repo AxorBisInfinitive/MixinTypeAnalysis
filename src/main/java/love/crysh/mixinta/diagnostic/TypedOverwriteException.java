@@ -41,4 +41,10 @@ public final class TypedOverwriteException extends RuntimeException {
                 .thenComparing(Diagnostic::code)
                 .thenComparing(Diagnostic::message)).toList();
     }
+
+    public static void throwIfErrors(List<Diagnostic> diagnostics) {
+        if (!diagnostics.isEmpty()) {
+            throw new TypedOverwriteException(diagnostics);
+        }
+    }
 }

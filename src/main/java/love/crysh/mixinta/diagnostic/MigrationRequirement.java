@@ -1,6 +1,7 @@
 package love.crysh.mixinta.diagnostic;
 
 import love.crysh.mixinta.model.MethodKey;
+import love.crysh.mixinta.model.MigrationEvidence;
 import love.crysh.mixinta.model.ProgramPoint;
 import love.crysh.mixinta.model.PropagationEdge;
 
@@ -18,4 +19,14 @@ public record MigrationRequirement(String id, MethodKey target, int parameter, S
             List<PropagationEdge> dependencies) {
         this(id, target, parameter, representation, dependencies, List.of());
     }
+
+    public static MigrationRequirement fromEvidence(MigrationEvidence evidence) {
+        return new MigrationRequirement(evidence.id(), evidence.target(), evidence.parameter(), evidence.representation(),
+                evidence.dependencies(), evidence.anchors());
+    }
+
+    public static List<MigrationRequirement> fromEvidence(List<MigrationEvidence> evidence) {
+        return evidence.stream().map(MigrationRequirement::fromEvidence).toList();
+    }
+
 }

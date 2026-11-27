@@ -1,5 +1,6 @@
 package love.crysh.mixinta.analysis;
 
+import love.crysh.mixinta.analysis.declaration.MixinAnnotations;
 import love.crysh.mixinta.bytecode.ClassFiles;
 import love.crysh.mixinta.diagnostic.DiagnosticVerbosity;
 import love.crysh.mixinta.diagnostic.TypedOverwriteException;
@@ -71,12 +72,20 @@ class TypedBatchRepresentationTest {
                 return first(next) + second(next);
                 """;
         String formatted = null;
+        String verbose = null;
         for (boolean reverse : new boolean[]{false, true}) {
             var fixture = fixture(body, "OtherPos", "RulesB", reverse);
             var prepared = fixture.prepare();
             var merged = BytecodeFixtures.mergeForCoreTest(fixture, prepared);
+            if (reverse) {
+                var ordered = new LinkedHashMap<String, byte[]>();
+                merged.entrySet().stream().sorted(Map.Entry.<String, byte[]>comparingByKey().reversed())
+                        .forEach(entry -> ordered.put(entry.getKey(), entry.getValue()));
+                merged = ordered;
+            }
             var snapshot = ClassFiles.snapshot(merged);
-            var failure = assertThrows(TypedOverwriteException.class, () -> prepared.analyze(merged));
+            var input = merged;
+            var failure = assertThrows(TypedOverwriteException.class, () -> prepared.analyze(input));
             assertTrue(failure.diagnostics().stream().anyMatch(value -> value.code().equals("CONTAINER_FACT_CONFLICT")));
             assertEquals(1, failure.diagnostics().size());
             String message = failure.format(DiagnosticVerbosity.NORMAL);
@@ -87,9 +96,13 @@ class TypedBatchRepresentationTest {
             assertTrue(message.contains("OtherPos"), message);
             if (formatted != null) assertEquals(formatted, message);
             formatted = message;
-            assertEquals(message, assertThrows(TypedOverwriteException.class, () -> prepared.analyze(merged))
+            String detailed = failure.format(DiagnosticVerbosity.VERBOSE);
+            if (verbose != null) assertEquals(verbose, detailed);
+            verbose = detailed;
+            assertEquals("READ", failure.diagnostics().getFirst().containers().getFirst().operation());
+            assertEquals(message, assertThrows(TypedOverwriteException.class, () -> prepared.analyze(input))
                     .format(DiagnosticVerbosity.NORMAL));
-            snapshot.forEach((name, bytes) -> assertArrayEquals(bytes, merged.get(name)));
+            snapshot.forEach((name, bytes) -> assertArrayEquals(bytes, input.get(name)));
         }
     }
 
@@ -242,7 +255,7 @@ class TypedBatchRepresentationTest {
         base.mixins().forEach((name, bytes) -> {
             var node = ClassFiles.read(bytes);
             node.methods.forEach(method -> {
-                var annotation = ClassFiles.annotation(method.visibleAnnotations, ClassFiles.TYPED_OVERWRITE);
+                var annotation = ClassFiles.annotation(method.visibleAnnotations, MixinAnnotations.TYPED_OVERWRITE);
                 if (annotation == null) return;
                 var declaration = (AnnotationNode) ((java.util.List<?>) ClassFiles.value(annotation, "parameters", java.util.List.of())).getFirst();
                 declaration.values.add("id");

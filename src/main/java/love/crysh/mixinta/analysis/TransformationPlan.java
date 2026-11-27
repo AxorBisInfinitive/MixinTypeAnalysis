@@ -1,10 +1,16 @@
 package love.crysh.mixinta.analysis;
 
-import love.crysh.mixinta.bytecode.ClassFiles;
+import love.crysh.mixinta.analysis.declaration.Migration;
+import love.crysh.mixinta.analysis.declaration.MixinAnnotations;
+import love.crysh.mixinta.analysis.plan.CallSite;
+import love.crysh.mixinta.analysis.plan.RepresentationPlan;
+import love.crysh.mixinta.analysis.plan.RepresentationPlanApplier;
 import love.crysh.mixinta.bytecode.ClassByteSource;
+import love.crysh.mixinta.bytecode.ClassFiles;
 import love.crysh.mixinta.bytecode.ClassHierarchy;
 import love.crysh.mixinta.bytecode.PrimitiveConversions;
 import love.crysh.mixinta.diagnostic.Diagnostic;
+import love.crysh.mixinta.diagnostic.TypedOverwriteException;
 import love.crysh.mixinta.model.MethodKey;
 
 import org.objectweb.asm.ClassWriter;
@@ -60,6 +66,7 @@ public final class TransformationPlan {
         for (RepresentationPlan plan : representationPlans) {
             plan.edits().forEach(value -> modified.add(value.location().method().owner()));
             plan.arguments().forEach(value -> modified.add(value.location().method().owner()));
+            plan.locals().forEach(value -> modified.add(value.method().owner()));
             plan.bridges().forEach(value -> modified.add(value.method().owner()));
         }
         return Set.copyOf(modified);
@@ -72,7 +79,7 @@ public final class TransformationPlan {
 
     public Map<String, byte[]> apply() {
         List<Diagnostic> diagnostics = new ArrayList<>();
-        Map<String, ClassNode> nodes = ClassFiles.readAll(classes, diagnostics);
+        Map<String, ClassNode> nodes = AnalysisClassReader.readAll(classes, diagnostics);
         Map<MethodKey, AbstractInsnNode[]> originalInstructions = new HashMap<>();
         Map<MethodKey, Integer> temporaryBases = new HashMap<>();
         Set<String> modified = modifiedClasses();
@@ -95,7 +102,7 @@ public final class TransformationPlan {
             }
         }
         for (RepresentationPlan plan : representationPlans) {
-            plan.apply(nodes, representationInstructions);
+            RepresentationPlanApplier.apply(plan, nodes, representationInstructions);
         }
         for (CallSite call : calls) {
             MethodKey key = call.caller();
@@ -114,7 +121,7 @@ public final class TransformationPlan {
             owner.methods.remove(ClassFiles.findMethod(owner, original.name(), original.descriptor()));
             MethodNode replacement = ClassFiles.findMethod(owner, implementation.name(), implementation.descriptor());
             replacement.access = migration.access();
-            replacement.visibleAnnotations.removeIf(annotation -> annotation.desc.equals(ClassFiles.TYPED_OVERWRITE));
+            replacement.visibleAnnotations.removeIf(annotation -> annotation.desc.equals(MixinAnnotations.TYPED_OVERWRITE));
         }
 
         ClassHierarchy hierarchy = new ClassHierarchy(nodes, resources);
@@ -143,7 +150,7 @@ public final class TransformationPlan {
                 diagnostics.add(new Diagnostic("OUTPUT_VERIFICATION_FAILED", null, -1, -1, name + " " + failure.getMessage()));
             }
         }
-        ClassFiles.throwIfErrors(diagnostics);
+        TypedOverwriteException.throwIfErrors(diagnostics);
         return output;
     }
 
