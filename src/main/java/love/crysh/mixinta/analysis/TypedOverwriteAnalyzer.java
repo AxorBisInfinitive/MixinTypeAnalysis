@@ -180,7 +180,9 @@ public final class TypedOverwriteAnalyzer {
 
     private void validateMigration(ClassNode target, MethodNode original, MethodNode implementation,
             MethodKey location, ClassHierarchy hierarchy, List<RepresentationMigration> representations, List<Diagnostic> diagnostics) {
-        if (!Type.getReturnType(original.desc).equals(Type.getReturnType(implementation.desc))) {
+        if (!Type.getReturnType(original.desc).equals(Type.getReturnType(implementation.desc))
+                && !PrimitiveConversions.isSupported(Type.getReturnType(implementation.desc),
+                        Type.getReturnType(original.desc))) {
             diagnostics.add(problem("RETURN_TYPE_NOT_IMPLEMENTED", location,
                     Type.getReturnType(original.desc) + " -> " + Type.getReturnType(implementation.desc)));
         }

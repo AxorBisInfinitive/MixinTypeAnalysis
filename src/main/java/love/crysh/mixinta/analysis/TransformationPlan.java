@@ -161,6 +161,15 @@ public final class TransformationPlan {
         method.instructions.insertBefore(invocation, conversion);
         invocation.owner = migration.original().owner();
         invocation.desc = migration.implementation().descriptor();
+        Type originalReturn = Type.getReturnType(migration.original().descriptor());
+        Type newReturn = Type.getReturnType(migration.implementation().descriptor());
+        if (!originalReturn.equals(newReturn)) {
+            InsnList restore = new InsnList();
+            for (int opcode : PrimitiveConversions.opcodes(newReturn, originalReturn)) {
+                restore.add(new InsnNode(opcode));
+            }
+            method.instructions.insert(invocation, restore);
+        }
         method.maxLocals = Math.max(method.maxLocals, nextLocal);
     }
 }
