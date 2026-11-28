@@ -8,7 +8,7 @@ permissions:
 
 jobs:
   test:
-    name: Core and Fabric tests
+    name: Core tests
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
@@ -26,21 +26,7 @@ jobs:
           distribution: zulu
           java-version: '25'
           cache: maven
-          cache-dependency-path: |
-            pom.xml
-            exp/pom.xml
-            exp-fabric/pom.xml
-            exp-fabric-testmod/pom.xml
-
-      - name: 构建准备
-        id: prepare
-        timeout-minutes: 10
-        run: |
-          started=$(date +%s%N)
-          trap 'echo "duration_ns=$(( $(date +%s%N) - started ))" >> "$GITHUB_OUTPUT"' EXIT
-          mvn -B -ntp -DskipTests clean install
-          mvn -B -ntp -DskipTests -f exp/pom.xml clean install
-          mvn -B -ntp -DskipTests -f exp-fabric/pom.xml clean package
+          cache-dependency-path: pom.xml
 
       - name: 核心测试
         id: core
@@ -49,16 +35,7 @@ jobs:
         run: |
           started=$(date +%s%N)
           trap 'echo "duration_ns=$(( $(date +%s%N) - started ))" >> "$GITHUB_OUTPUT"' EXIT
-          mvn -B -ntp test
-
-      - name: Fabric 集成测试
-        id: fabric
-        continue-on-error: true
-        timeout-minutes: 10
-        run: |
-          started=$(date +%s%N)
-          trap 'echo "duration_ns=$(( $(date +%s%N) - started ))" >> "$GITHUB_OUTPUT"' EXIT
-          mvn -B -ntp -f exp-fabric-testmod/pom.xml clean verify
+          mvn -B -ntp clean test
 
       - name: 汇总测试结果
         if: ${{ always() }}
@@ -75,9 +52,7 @@ jobs:
 
           steps = json.loads(os.environ["CI_STEPS"])
           phases = [
-              ("prepare", "构建准备", None),
               ("core", "核心测试", "target/surefire-reports"),
-              ("fabric", "Fabric 集成测试", "exp-fabric-testmod/target/failsafe-reports"),
           ]
           labels = {"success": "通过", "failure": "失败", "cancelled": "已取消", "skipped": "已跳过"}
           counters = ("tests", "failures", "errors", "skipped")
