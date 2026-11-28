@@ -8,7 +8,6 @@ import love.crysh.mixinta.model.PropagationEdge;
 import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.AbstractInsnNode;
 
-import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
@@ -48,8 +47,6 @@ record RepresentationFacts(Set<InstructionLocation> requested, Set<InstructionLo
             graph.ancestors(issue.anchors()).stream().filter(subject -> subject.kind() == ConstraintGraph.Kind.VALUE)
                     .forEach(subject -> unresolvedValues.add(new InstructionLocation(subject.location().method(), subject.location().instruction())));
         }
-        Map<InstructionLocation, ProgramPoint> points = new LinkedHashMap<>();
-        sites.values().forEach(site -> points.put(location(site), site.point()));
         Set<InstructionLocation> values = requested.stream().map(origin -> location(sites.get(origin)))
                 .collect(java.util.stream.Collectors.toSet());
         Set<InstructionLocation> nulls = requested.stream().filter(origin -> origin.getOpcode() == Opcodes.ACONST_NULL)
@@ -58,7 +55,7 @@ record RepresentationFacts(Set<InstructionLocation> requested, Set<InstructionLo
                 .collect(java.util.stream.Collectors.toSet());
         Set<StorageSlot> observed = input.containerUses().stream().filter(use -> use.summary() != null)
                 .flatMap(use -> use.receivers().slots(use.summary().channel()).stream()).collect(java.util.stream.Collectors.toSet());
-        return new RepresentationFacts(values, migratedValues, observed, storages, orderedEdges(dependencies), graph, points,
+        return new RepresentationFacts(values, migratedValues, observed, storages, input.work.orderedEdges(dependencies), graph, input.points(),
                 nulls, unresolvedValues, unresolvedStorages);
     }
 }

@@ -3,7 +3,6 @@ package love.crysh.mixinta.analysis.representation;
 import love.crysh.mixinta.analysis.container.ContainerCallGraph;
 import love.crysh.mixinta.analysis.container.ContainerFlow;
 import love.crysh.mixinta.analysis.container.ContainerReference;
-import love.crysh.mixinta.analysis.container.ContainerRules;
 import love.crysh.mixinta.analysis.container.ContainerSummary;
 import love.crysh.mixinta.analysis.container.JdkContainerSummaries;
 import love.crysh.mixinta.analysis.container.MethodContainerSummary;
@@ -25,7 +24,6 @@ import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.Type;
 import org.objectweb.asm.tree.AbstractInsnNode;
 import org.objectweb.asm.tree.MethodInsnNode;
-import org.objectweb.asm.tree.VarInsnNode;
 
 import java.util.ArrayDeque;
 import java.util.ArrayList;
@@ -47,7 +45,6 @@ final class RepresentationSolver {
     private final RepresentationMigration migration;
     private final Map<MethodKey, Migration> targets;
     private final ClassHierarchy hierarchy;
-    private final ContainerRules containers;
     private final List<ContainerFlow> flows = new ArrayList<>();
     private final Map<AbstractInsnNode, AnalysisSite> sites = new IdentityHashMap<>();
     private final Set<AbstractInsnNode> migrated = new LinkedHashSet<>();
@@ -68,7 +65,6 @@ final class RepresentationSolver {
         migration = migrations.getFirst();
         this.targets = targets;
         this.hierarchy = hierarchy;
-        containers = new ContainerRules(migration.containers());
     }
 
     PropagationResult solve(RepresentationInput input) {
@@ -114,21 +110,15 @@ final class RepresentationSolver {
     }
 
     private void seedTargets() {
-        for (ContainerFlow flow : flows) {
-            for (int index = 0; index < flow.source().instructionCount(); index++) {
-                if (!flow.source().reachable(index) || !(flow.source().instruction(index) instanceof MethodInsnNode call)) {
-                    continue;
-                }
-                Migration target = target(call, targets, hierarchy);
-                if (target == null) {
-                    continue;
-                }
-                for (RepresentationMigration declaration : migrations) {
-                    if (target.original().equals(declaration.target())) {
-                        request(flow.source().argument(index, call, declaration.parameter()),
-                                new AnalysisSite(flow, index).point("parameter=" + declaration.parameter()),
-                                DependencyKind.TARGET_ARGUMENT);
-                    }
+        for (var candidate : input.targetCalls()) {
+            AnalysisSite site = candidate.site();
+            MethodInsnNode call = candidate.call();
+            Migration target = target(call, targets, hierarchy);
+            if (target == null) continue;
+            for (RepresentationMigration declaration : migrations) {
+                if (target.original().equals(declaration.target())) {
+                    request(site.flow().source().argument(site.index(), call, declaration.parameter()),
+                            site.point("parameter=" + declaration.parameter()), DependencyKind.TARGET_ARGUMENT);
                 }
             }
         }
@@ -171,8 +161,8 @@ final class RepresentationSolver {
                 } else if (isUnbox(call)) {
                     migrated.add(origin);
                     request(site.flow().source().receiver(site.index(), call), site.point(), DependencyKind.UNBOXING);
-                } else if (summary(site, call, containers) != null && summary(site, call, containers).readsElement()) {
-                    ContainerSummary summary = summary(site, call, containers);
+                } else if (input.summary(site, call) != null && input.summary(site, call).readsElement()) {
+                    ContainerSummary summary = input.summary(site, call);
                     migrated.add(origin);
                     requireStorage(site.flow().receiverReferences(site.index(), call), site.point(), summary.channel());
                 } else {
@@ -252,34 +242,21 @@ final class RepresentationSolver {
             }
         }
         // 所有读取方都要跟随共享元素迁移，包含最终传入旧消费者的读取。
-        for (ContainerFlow flow : flows) {
-            for (int index = 0; index < flow.source().instructionCount(); index++) {
-                if (flow.source().reachable(index) && flow.source().instruction(index) instanceof MethodInsnNode call
-                        && isUnbox(call) && touches(flow.source().receiver(index, call), migrated)) {
-                    request(OriginValue.of(2, call), firstMigratedPoint(flow.source().receiver(index, call)), DependencyKind.UNBOXING);
-                }
+        for (var candidate : input.unboxes()) {
+            AnalysisSite site = candidate.site();
+            OriginValue receiver = site.flow().source().receiver(site.index(), candidate.call());
+            if (input.work.touches(receiver, migrated)) {
+                request(OriginValue.of(2, candidate.call()), firstMigratedPoint(receiver), DependencyKind.UNBOXING);
             }
         }
     }
 
     private void unifyLocalMerges() {
-        for (ContainerFlow flow : flows) {
-            for (int index = 0; index < flow.source().instructionCount(); index++) {
-                if (!flow.source().reachable(index) || !(flow.source().instruction(index) instanceof VarInsnNode variable)) {
-                    continue;
-                }
-                OriginValue value = switch (variable.getOpcode()) {
-                    case Opcodes.LLOAD, Opcodes.ALOAD -> flow.source().local(index, variable.var);
-                    case Opcodes.LSTORE, Opcodes.ASTORE -> flow.source().top(index);
-                    default -> null;
-                };
-                if (value != null && touches(value, migrated)) {
-                    for (AbstractInsnNode source : ordered(value.origins())) {
-                        if (migrated.contains(source)) {
-                            request(value, new AnalysisSite(flow, index).point(), DependencyKind.LOCAL_MERGE);
-                        }
-                    }
-                }
+        for (var candidate : input.locals()) {
+            input.work.localCandidates++;
+            if (input.work.touches(candidate.value(), migrated)) {
+                input.work.localRequests++;
+                request(candidate.value(), candidate.site().point(), DependencyKind.LOCAL_MERGE);
             }
         }
     }
@@ -304,7 +281,7 @@ final class RepresentationSolver {
         return origins.stream().sorted((left, right) -> {
             AnalysisSite first = sites.get(left);
             AnalysisSite second = sites.get(right);
-            int method = first.method().toString().compareTo(second.method().toString());
+            int method = first.flow().source().defaultSymbol().compareTo(second.flow().source().defaultSymbol());
             return method == 0 ? Integer.compare(first.index(), second.index()) : method;
         }).toList();
     }

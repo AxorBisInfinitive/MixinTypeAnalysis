@@ -95,7 +95,13 @@ public final class AnalysisComparison {
             Map<String, String> fields = new TreeMap<>();
             for (var component : value.getClass().getRecordComponents()) {
                 try {
-                    fields.put(component.getName(), canonical(component.getAccessor().invoke(value)));
+                    Object field = component.getAccessor().invoke(value);
+                    // anchors 来自无序集合，跨 JVM 对照按完整锚点身份比较。
+                    if (component.getName().equals("anchors") && (value instanceof love.crysh.mixinta.model.MigrationEvidence
+                            || value instanceof love.crysh.mixinta.diagnostic.MigrationRequirement)) {
+                        field = ((List<?>) field).stream().map(AnalysisComparison::canonical).sorted().toList();
+                    }
+                    fields.put(component.getName(), canonical(field));
                 } catch (IllegalAccessException | InvocationTargetException failure) {
                     throw new IllegalStateException(failure);
                 }

@@ -62,6 +62,9 @@ public final class ContainerCallGraph {
     private final Set<MethodKey> rooted = new LinkedHashSet<>();
     private final Map<MethodKey, Set<MethodKey>> virtualTargets = new LinkedHashMap<>();
     private final Map<String, List<ClassNode>> receiverClasses = new LinkedHashMap<>();
+    private Map<ProgramPoint, Dispatch> finalDispatches;
+    private List<PropagationEdge> finalDependencies;
+    private long finalDispatchBuilds, finalDispatchHits, dependencyBuilds, valueResolutions, valueOrigins, recordedUnknowns;
 
     ContainerCallGraph(Map<String, ClassNode> classes, List<ContainerFlow> methods, ClassHierarchy hierarchy, ContainerRules containers) {
         this(classes, methods, hierarchy, containers, new AnalysisMetrics());
@@ -148,6 +151,17 @@ public final class ContainerCallGraph {
             metrics.add(AnalysisMetrics.Stage.CONTAINER_UNKNOWN, System.nanoTime() - unknownStarted);
         }
         converge(false);
+        long dispatchStarted = System.nanoTime();
+        try {
+            Map<ProgramPoint, Dispatch> completed = new LinkedHashMap<>();
+            for (var call : calls.values()) {
+                completed.put(call.point(), dispatch(call));
+                finalDispatchBuilds++;
+            }
+            finalDispatches = Map.copyOf(completed);
+        } finally {
+            metrics.add(AnalysisMetrics.Stage.CONTAINER_FINAL_DISPATCH, System.nanoTime() - dispatchStarted);
+        }
         long relationshipsStarted = System.nanoTime();
         try {
             for (var call : calls.values()) {
@@ -174,15 +188,29 @@ public final class ContainerCallGraph {
                 flow.initializeAliases(aliases);
                 metrics.count(AnalysisMetrics.Count.ALIAS_POSITIONS, aliases.positionCount());
                 metrics.count(AnalysisMetrics.Count.ALIAS_VALUES, aliases.valueCount());
+                metrics.count(AnalysisMetrics.Count.ALIAS_CAPACITY_HINTS, flow.source().originCount());
             }
         } finally {
             metrics.add(AnalysisMetrics.Stage.CONTAINER_ALIASES, System.nanoTime() - aliasesStarted);
         }
+        long dependenciesStarted = System.nanoTime();
+        try {
+            finalDependencies = buildDependencies();
+        } finally {
+            metrics.add(AnalysisMetrics.Stage.CONTAINER_DEPENDENCIES, System.nanoTime() - dependenciesStarted);
+        }
     }
 
-    void recordMetrics() {
+    public void recordMetrics() {
         joiner.recordMetrics(metrics);
-        metrics.count(AnalysisMetrics.Count.UNKNOWN_VALUES, unknowns.size());
+        metrics.count(AnalysisMetrics.Count.UNKNOWN_VALUES, unknowns.size() - recordedUnknowns);
+        recordedUnknowns = unknowns.size();
+        metrics.count(AnalysisMetrics.Count.FINAL_DISPATCH_BUILDS, finalDispatchBuilds);
+        metrics.count(AnalysisMetrics.Count.FINAL_DISPATCH_HITS, finalDispatchHits);
+        metrics.count(AnalysisMetrics.Count.DEPENDENCY_BUILDS, dependencyBuilds);
+        metrics.count(AnalysisMetrics.Count.VALUE_RESOLUTIONS, valueResolutions);
+        metrics.count(AnalysisMetrics.Count.VALUE_ORIGINS, valueOrigins);
+        finalDispatchBuilds = finalDispatchHits = dependencyBuilds = valueResolutions = valueOrigins = 0;
     }
 
     private void converge(boolean first) {
@@ -268,6 +296,8 @@ public final class ContainerCallGraph {
     }
 
     public StorageReferences resolve(MethodKey method, MethodContainerSummary.Value value) {
+        valueResolutions++;
+        valueOrigins += value.origins().size();
         StorageReferences result = new StorageReferences(Set.of(), Set.of(), value.nullable());
         for (var origin : value.origins()) {
             StorageReferences reference = switch (origin) {
@@ -304,6 +334,10 @@ public final class ContainerCallGraph {
     }
 
     private Dispatch dispatch(MethodContainerSummary.Call call) {
+        if (finalDispatches != null) {
+            finalDispatchHits++;
+            return finalDispatches.get(call.point());
+        }
         dispatches++;
         if (call.receiver() != null && call.intrinsic() == null) {
             MethodInsnNode instruction = (MethodInsnNode) flows.get(call.point().method()).source().instruction(call.point().instruction());
@@ -424,6 +458,11 @@ public final class ContainerCallGraph {
     }
 
     public List<PropagationEdge> dependencies() {
+        return finalDependencies == null ? buildDependencies() : finalDependencies;
+    }
+
+    private List<PropagationEdge> buildDependencies() {
+        dependencyBuilds++;
         Set<PropagationEdge> edges = new LinkedHashSet<>();
         for (var call : derived.values()) {
             originEdges(edges, call.point(), call.point().method(), call.receiver(), DependencyKind.CONTAINER_VIEW);

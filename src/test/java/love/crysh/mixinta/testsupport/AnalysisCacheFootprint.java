@@ -24,6 +24,8 @@ public final class AnalysisCacheFootprint {
         for (var source : sources) indices += mapSize(field(source, "indexSnapshot"), false);
         long aliases = 0;
         long unknowns = 0;
+        long dispatches = 0;
+        long dependencies = 0;
         for (var analysis : analyses) {
             for (var flow : analysis.flows()) {
                 Object cache = flow.aliases();
@@ -32,8 +34,21 @@ public final class AnalysisCacheFootprint {
                 aliases += mapSize(field(cache, "values"), false);
             }
             unknowns += mapSize(field(analysis.callGraph(), "unknowns"), false);
+            Object completed = field(analysis.callGraph(), "finalDispatches");
+            dispatches += mapSize(completed, false);
+            if (completed instanceof Map<?, ?> map) {
+                for (Object dispatch : map.values()) dispatches += instrumentation.getObjectSize(dispatch);
+            }
+            Object evidence = field(analysis.callGraph(), "finalDependencies");
+            if (evidence instanceof Collection<?> edges) {
+                dependencies += instrumentation.getObjectSize(evidence);
+                Object elements = field(evidence, "elements");
+                if (elements != null) dependencies += instrumentation.getObjectSize(elements);
+                for (Object edge : edges) dependencies += instrumentation.getObjectSize(edge);
+            }
         }
-        return Map.of("indexCacheBytes", indices, "aliasCacheBytes", aliases, "unknownCacheBytes", unknowns);
+        return Map.of("indexCacheBytes", indices, "aliasCacheBytes", aliases, "unknownCacheBytes", unknowns,
+                "dispatchCacheBytes", dispatches, "dependencyCacheBytes", dependencies);
     }
 
     private static long mapSize(Object value, boolean includeKeys) throws IllegalAccessException {

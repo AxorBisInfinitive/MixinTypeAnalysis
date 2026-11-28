@@ -34,6 +34,11 @@ class MethodFlowTest {
         assertFalse(flow.reachable(6));
         assertSame(call, flow.instruction(3));
         assertEquals(3, flow.indexOf(call));
+        assertSame(flow.defaultSymbol(), flow.point(-1).symbol());
+        assertSame(flow.defaultSymbol(), flow.point(-3).symbol());
+        assertSame(flow.defaultSymbol(), flow.point(200).symbol());
+        assertEquals("sample/Receiver.accept(JLjava/lang/Object;)V", flow.point(3).symbol());
+        assertTrue(flow.originCount() > 0);
         assertSame(flow.indices(), flow.indices());
         assertEquals(3, flow.indices().get(call));
         var missing = new InsnNode(Opcodes.NOP);

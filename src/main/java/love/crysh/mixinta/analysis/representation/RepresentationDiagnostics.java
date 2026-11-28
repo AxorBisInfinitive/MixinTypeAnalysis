@@ -35,6 +35,7 @@ import static love.crysh.mixinta.analysis.representation.RepresentationQueries.*
 /** 把阶段问题与语义证据转换为公开诊断。 */
 final class RepresentationDiagnostics {
     private final RepresentationMigration migration;
+    private final RepresentationWork work;
     private final Type representation;
     private final ContainerRules containers;
     private final List<ContainerUse> containerUses;
@@ -46,6 +47,7 @@ final class RepresentationDiagnostics {
     private final ElementFacts batch;
 
     RepresentationDiagnostics(RepresentationMigration migration, RepresentationInput input, ValidationResult result, ElementFacts facts) {
+        work = input.work;
         var analysis = result.facts();
         this.migration = migration;
         representation = migration.representation();
@@ -88,7 +90,7 @@ final class RepresentationDiagnostics {
                     representation.getDescriptor(), relevant, anchors.stream().map(ConstraintGraph.Subject::point).distinct().toList());
             int instruction = issue.site().index();
             Diagnostic diagnostic = new Diagnostic(issue.code(), issue.site().method(), instruction, issue.parameter(),
-                    issue.message(), migration.id(), orderedEdges(java.util.stream.Stream.concat(relevant.stream(), referenceEvidence(relatedStorages(issue)).stream()).toList()), issue.candidates(),
+                    issue.message(), migration.id(), work.orderedEdges(java.util.stream.Stream.concat(relevant.stream(), referenceEvidence(relatedStorages(issue)).stream()).toList()), issue.candidates(),
                     migration.target(), migration.parameter(), originalType.getDescriptor(), representation.getDescriptor(), requirement(issue.code()),
                     dependencyPath(failurePoint, relevant), issue.site().symbol()).withFailureDetail(failureDetail);
             result.add(new Entry(diagnostic.withContainers(observationsAt( issue.site().point(), issue.parameter(),

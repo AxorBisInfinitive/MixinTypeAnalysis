@@ -20,6 +20,48 @@ import static org.junit.jupiter.api.Assertions.*;
 
 class ContainerCallGraphTest {
     @Test
+    void finalizedQueriesReuseDispatchAndDependenciesAfterSecondConvergence() {
+        var classes = love.crysh.mixinta.testsupport.BytecodeFixtures.compile(Map.of("sample.Subject", """
+                package sample;
+                public class Subject {
+                    public static Object run(Object value) { return pass(value); }
+                    public static Object pass(Object value) { return value; }
+                }
+                """));
+        var node = love.crysh.mixinta.bytecode.ClassFiles.read(classes.get("sample/Subject"));
+        var nodes = Map.of(node.name, node);
+        var metrics = new love.crysh.mixinta.analysis.AnalysisMetrics();
+        var analysis = ContainerAnalysis.analyzeAll(nodes, Set.of(), new ClassHierarchy(nodes, getClass().getClassLoader()),
+                List.of(List.of()), metrics).get(Set.of());
+        var graph = analysis.callGraph();
+        var dependencies = graph.dependencies();
+        for (int index = 0; index < 5; index++) {
+            assertSame(dependencies, graph.dependencies());
+            analysis.summaries().values().forEach(summary -> summary.calls().forEach(call -> {
+                graph.covered(call.point());
+                graph.coverage(call.point());
+            }));
+        }
+        graph.recordMetrics();
+        assertEquals(1, metrics.count(love.crysh.mixinta.analysis.AnalysisMetrics.Count.DEPENDENCY_BUILDS));
+        assertTrue(metrics.count(love.crysh.mixinta.analysis.AnalysisMetrics.Count.FINAL_DISPATCH_HITS) > 10);
+        assertTrue(metrics.count(love.crysh.mixinta.analysis.AnalysisMetrics.Count.SECOND_ROUNDS) > 0);
+    }
+
+    @Test
+    void emptyOriginValuesRemainBoundToCompleteUseLocations() {
+        var method = new MethodNode(Opcodes.ACC_STATIC, "run", "()V", null, null);
+        method.instructions.add(new InsnNode(Opcodes.RETURN));
+        var flow = new MethodFlow("sample/Subject", method);
+        var analyzer = new ContainerMethodAnalyzer(new ContainerFlow(flow, new ContainerRules(List.of())));
+        var source = new love.crysh.mixinta.analysis.flow.OriginValue(1, Set.of());
+        var first = new ProgramPoint(flow.key(), 3, "call", "receiver");
+        var second = new ProgramPoint(flow.key(), 3, "call", "parameter=0");
+        assertEquals(producer(first), analyzer.value(source, first));
+        assertEquals(producer(second), analyzer.value(source, second));
+        assertNotEquals(analyzer.value(source, first), analyzer.value(source, second));
+    }
+    @Test
     void reusesUnknownsByCompleteLocationWithoutAddingSolverNodes() throws Exception {
         var graph = new ContainerCallGraph(Map.of(), List.of(), new ClassHierarchy(Map.of(), getClass().getClassLoader()), new ContainerRules(List.of()));
         var method = new MethodKey("sample/Subject", "run", "()V");

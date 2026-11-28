@@ -69,20 +69,85 @@ public final class RepresentationBatch {
                 .map(value -> new Session(List.of(value))).toList();
         var containers = ContainerAnalysis.analyzeAll(classes, targets.keySet(), hierarchy,
                 sessions.stream().map(session -> session.declarations.getFirst().containers()).toList(), metrics);
+        ClassHierarchy queries = hierarchy.readOnlyQueries();
         long representationStarted = System.nanoTime();
         Map<java.util.Set<ContainerContract>, RepresentationInput> inputs = new LinkedHashMap<>();
-        containers.forEach((contracts, analysis) -> inputs.put(contracts, new RepresentationInput(analysis)));
-        for (Session session : sessions) {
-            var contracts = session.declarations.getFirst().containers();
-            session.input = inputs.get(java.util.Set.copyOf(contracts));
-            session.analysis = new RepresentationSolver(session.declarations, targets, hierarchy).solve(session.input);
+        Map<love.crysh.mixinta.analysis.flow.MethodFlow, Long> pointCounts = new java.util.IdentityHashMap<>();
+        containers.values().forEach(analysis -> analysis.flows().forEach(flow -> pointCounts.put(flow.source(), flow.source().pointCreations())));
+        ElementFacts facts;
+        List<Diagnostic> diagnostics;
+        try {
+            try {
+                timed(metrics, AnalysisMetrics.Stage.REPRESENTATION_INPUT, () -> {
+                    containers.forEach((contracts, analysis) -> inputs.put(contracts, new RepresentationInput(analysis, targets.keySet())));
+                    return null;
+                });
+                timed(metrics, AnalysisMetrics.Stage.REPRESENTATION_PROPAGATION, () -> {
+                    for (Session session : sessions) {
+                        var contracts = session.declarations.getFirst().containers();
+                        session.input = inputs.get(java.util.Set.copyOf(contracts));
+                        session.analysis = new RepresentationSolver(session.declarations, targets, queries).solve(session.input);
+                    }
+                    return null;
+                });
+                ElementFacts initial = timed(metrics, AnalysisMetrics.Stage.REPRESENTATION_INITIAL_FACTS, () -> facts(sessions));
+                timed(metrics, AnalysisMetrics.Stage.REPRESENTATION_VALIDATION, () -> {
+                    for (Session session : sessions) {
+                        session.validation = new RepresentationValidator(session.declarations.getFirst(), session.analysis,
+                                session.input, targets, classes, queries, initial).validate();
+                    }
+                    return null;
+                });
+                facts = timed(metrics, AnalysisMetrics.Stage.REPRESENTATION_FINAL_FACTS, () -> facts(sessions));
+                timed(metrics, AnalysisMetrics.Stage.REPRESENTATION_CONFLICTS, () -> {
+                    validateConflicts(sessions, facts, conflicts);
+                    return null;
+                });
+                diagnostics = timed(metrics, AnalysisMetrics.Stage.REPRESENTATION_DIAGNOSTICS, () ->
+                        RepresentationDiagnostics.collect(sessions.stream().map(session -> new RepresentationDiagnostics(
+                                session.declarations.getFirst(), session.input, session.validation, facts)).toList(), conflicts, facts));
+            } finally {
+                metrics.add(AnalysisMetrics.Stage.REPRESENTATION, System.nanoTime() - representationStarted);
+            }
+            if (!diagnostics.isEmpty()) return new RepresentationBatchResult(java.util.Optional.empty(), diagnostics);
+            return timed(metrics, AnalysisMetrics.Stage.PLAN, () -> {
+                var plans = sessions.stream().map(session -> new RepresentationPlanner(session.declarations, session.input,
+                        session.validation, targets, classes, queries, facts).plan()).toList();
+                var merged = RepresentationPlanMerger.merge(plans, classes);
+                return new RepresentationBatchResult(merged.plan(), RepresentationDiagnostics.planConflicts(merged.conflicts()));
+            });
+        } finally {
+            recordWork(inputs, sessions, metrics);
+            pointCounts.forEach((flow, before) -> metrics.count(AnalysisMetrics.Count.POINT_CREATIONS, flow.pointCreations() - before));
+            var work = queries.queryStats();
+            metrics.count(AnalysisMetrics.Count.HIERARCHY_QUERIES, work.calls());
+            metrics.count(AnalysisMetrics.Count.HIERARCHY_HITS, work.hits());
+            metrics.count(AnalysisMetrics.Count.HIERARCHY_FAILURES, work.failures());
+            metrics.count(AnalysisMetrics.Count.HIERARCHY_NODES, work.nodes());
         }
-        ElementFacts initial = facts(sessions);
-        for (Session session : sessions) {
-            session.validation = new RepresentationValidator(session.declarations.getFirst(), session.analysis,
-                    session.input, targets, classes, hierarchy, initial).validate();
+    }
+
+    private static <T> T timed(AnalysisMetrics metrics, AnalysisMetrics.Stage stage, java.util.function.Supplier<T> action) {
+        long started = System.nanoTime();
+        try {
+            return action.get();
+        } finally {
+            metrics.add(stage, System.nanoTime() - started);
         }
-        ElementFacts facts = facts(sessions);
+    }
+
+    private static void recordWork(Map<java.util.Set<ContainerContract>, RepresentationInput> inputs,
+            List<Session> sessions, AnalysisMetrics metrics) {
+        inputs.values().forEach(input -> {
+            input.work.recordMetrics(metrics);
+            if (input.containers().callGraph() != null) input.containers().callGraph().recordMetrics();
+        });
+        for (Session session : sessions) {
+            if (session.analysis != null) session.facts().graph().recordMetrics(metrics);
+        }
+    }
+
+    private static void validateConflicts(List<Session> sessions, ElementFacts facts, List<BatchConflict> conflicts) {
         validateIdentities(sessions, conflicts);
         for (var entry : facts.storages.entrySet()) {
             if (entry.getValue().state() == ElementState.CONFLICT) {
@@ -105,16 +170,6 @@ public final class RepresentationBatch {
             }
         }
         validateRules(sessions, facts, conflicts);
-        List<Diagnostic> diagnostics = RepresentationDiagnostics.collect(sessions.stream().map(session ->
-                new RepresentationDiagnostics(session.declarations.getFirst(), session.input, session.validation, facts)).toList(), conflicts, facts);
-        metrics.add(AnalysisMetrics.Stage.REPRESENTATION, System.nanoTime() - representationStarted);
-        if (!diagnostics.isEmpty()) return new RepresentationBatchResult(java.util.Optional.empty(), diagnostics);
-        long planningStarted = System.nanoTime();
-        var plans = sessions.stream().map(session ->
-                new RepresentationPlanner(session.declarations, session.input, session.validation, targets, classes, hierarchy, facts).plan()).toList();
-        var merged = RepresentationPlanMerger.merge(plans, classes);
-        metrics.add(AnalysisMetrics.Stage.PLAN, System.nanoTime() - planningStarted);
-        return new RepresentationBatchResult(merged.plan(), RepresentationDiagnostics.planConflicts(merged.conflicts()));
     }
 
     private static ElementFacts facts(List<Session> sessions) {

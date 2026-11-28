@@ -57,7 +57,7 @@ public final class ContainerPerformanceProbe {
                     }
                     """)), groups);
         }
-        for (int count : new int[]{16, 64}) {
+        for (int count : new int[]{4, 16, 64, 256}) {
             String branches = "";
             for (int index = 0; index < count; index++) branches += "case " + index + ": value = new java.util.ArrayDeque<>(); break;";
             String source = "package sample; public class Subject {"

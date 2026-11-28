@@ -7,10 +7,50 @@ import love.crysh.mixinta.model.ProgramPoint;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.*;
 
 class ConstraintGraphTest {
+    @Test
+    void locationIndexKeepsSubjectIdentityAndInvalidatesOnMutableChanges() {
+        var method = new MethodKey("sample/Subject", "run", "()V");
+        var point = new ProgramPoint(method, 3, "call");
+        var argument = ConstraintGraph.use(point, 0);
+        var receiver = ConstraintGraph.receiver(point);
+        var operand = ConstraintGraph.operand(point, 0);
+        var source = ConstraintGraph.value(new ProgramPoint(method, 1, "source"));
+        var graph = new ConstraintGraph();
+        graph.link(argument, source, DependencyKind.TARGET_ARGUMENT);
+        assertEquals(Set.of(argument), graph.at(new ProgramPoint(method, 3, "other", "detail"), 0));
+        graph.link(receiver, source, DependencyKind.SOURCE_RESULT);
+        graph.link(operand, source, DependencyKind.SOURCE_RESULT);
+        assertEquals(List.of(argument, receiver, operand), List.copyOf(graph.at(point, -1)));
+        var snapshot = graph.snapshot();
+        assertEquals(Set.of(argument), snapshot.at(point, 0));
+        assertEquals(graph.evidence(List.of(source)), snapshot.evidence(List.of(source)));
+        assertSame(snapshot.evidence(List.of(source)), snapshot.evidence(List.of(source)));
+        var copy = snapshot.mutableCopy();
+        var capture = ConstraintGraph.capture(point, 0);
+        copy.link(capture, source, DependencyKind.OTHER);
+        assertEquals(3, snapshot.at(point, -1).size());
+        assertEquals(4, copy.at(point, -1).size());
+    }
+
+    @Test
+    void evidenceRetainsDifferentKindsAndDeduplicatesEqualSubjectPoints() {
+        var method = new MethodKey("sample/Subject", "run", "()V");
+        var point = new ProgramPoint(method, 1, "source");
+        var value = ConstraintGraph.value(point);
+        var unknown = ConstraintGraph.unknown(point);
+        var target = ConstraintGraph.use(new ProgramPoint(method, 2, "target"), 0);
+        var graph = new ConstraintGraph();
+        graph.link(target, value, DependencyKind.TARGET_ARGUMENT);
+        graph.link(target, unknown, DependencyKind.TARGET_ARGUMENT);
+        graph.link(target, value, DependencyKind.LOCAL_MERGE);
+        assertEquals(2, graph.evidence(List.of(value, unknown)).size());
+        assertEquals(2, graph.snapshot().evidence(List.of(value, unknown)).size());
+    }
     @Test
     void validationCopyCannotChangePropagationSnapshotOrItsEvidence() {
         var method = new MethodKey("sample/Subject", "run", "()V");

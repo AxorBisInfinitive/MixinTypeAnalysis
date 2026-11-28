@@ -13,6 +13,24 @@ import java.util.Set;
 import static org.junit.jupiter.api.Assertions.*;
 
 class ReferenceJoinerTest {
+    @Test
+    void growingUnionsPreserveOverlapsAndSealBothComponents() {
+        var first = new LinkedHashSet<ProgramPoint>();
+        var second = new LinkedHashSet<ProgramPoint>();
+        for (int index = 0; index < 64; index++) first.add(new ProgramPoint(METHOD, index, "value"));
+        for (int index = 32; index < 96; index++) second.add(new ProgramPoint(METHOD, index, "value"));
+        var joiner = new ReferenceJoiner();
+        var joined = joiner.join(facts(Set.of(KEY), first, false), facts(Set.of(VALUE), second, true));
+        assertEquals(96, joined.unknownOrigins().size());
+        assertEquals(Set.of(KEY, VALUE), joined.references());
+        assertTrue(joined.nullable());
+        first.clear();
+        second.clear();
+        assertEquals(96, joined.unknownOrigins().size());
+        var metrics = new AnalysisMetrics();
+        joiner.recordMetrics(metrics);
+        assertEquals(98, metrics.count(AnalysisMetrics.Count.REFERENCE_SEALED_ELEMENTS));
+    }
     private static final MethodKey METHOD = new MethodKey("sample/Subject", "run", "()V");
     private static final StorageId STORAGE = new StorageId(METHOD, 3, "Ljava/util/Map;");
     private static final ContainerReference KEY = new ContainerReference(STORAGE, 0, ContainerReference.Kind.KEYS);

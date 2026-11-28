@@ -11,11 +11,12 @@ import java.util.function.Function;
 public final class ContainerAliases {
     private final MethodFlow source;
     // OriginValue 具有值相等语义，缓存必须继续区分来源对象身份。
-    private final IdentityHashMap<OriginValue, StorageReferences> values = new IdentityHashMap<>();
+    private final IdentityHashMap<OriginValue, StorageReferences> values;
     private final long positionCount;
 
     ContainerAliases(MethodFlow source, Function<OriginValue, StorageReferences> resolver) {
         this.source = source;
+        values = new IdentityHashMap<>(source.originCount());
         long positions = 0;
         Function<OriginValue, StorageReferences> resolve = value -> Objects.requireNonNull(resolver.apply(value));
         for (int instruction = 0; instruction < source.instructionCount(); instruction++) {

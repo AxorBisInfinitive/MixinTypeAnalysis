@@ -11,6 +11,7 @@ final class ReferenceJoiner {
     private long reuses;
     private long growths;
     private long copiedElements;
+    private long unions, unionReuses, unionGrowths, membershipChecks, sealedElements;
 
     StorageReferences join(StorageReferences first, StorageReferences second) {
         calls++;
@@ -25,6 +26,7 @@ final class ReferenceJoiner {
         if (references.size() == second.references().size() && unknown.size() == second.unknownOrigins().size()
                 && nullable == second.nullable()) return reused(second);
         growths++;
+        sealedElements += references.size() + unknown.size();
         return new StorageReferences(references, unknown, nullable);
     }
 
@@ -34,20 +36,25 @@ final class ReferenceJoiner {
     }
 
     private <T> Set<T> union(Set<T> first, Set<T> second) {
-        if (first == second || second.isEmpty()) return first;
-        if (first.isEmpty()) return second;
+        unions++;
+        if (first == second || second.isEmpty()) { unionReuses++; return first; }
+        if (first.isEmpty()) { unionReuses++; return second; }
         Set<T> base = first.size() >= second.size() ? first : second;
         Set<T> additions = base == first ? second : first;
         Set<T> merged = null;
         for (T value : additions) {
-            if (base.contains(value)) continue;
-            if (merged == null) {
+            membershipChecks++;
+            if (merged != null) {
+                if (merged.add(value)) copiedElements++;
+            } else if (!base.contains(value)) {
                 merged = new LinkedHashSet<>(base);
                 copiedElements += base.size();
+                merged.add(value);
+                copiedElements++;
             }
-            merged.add(value);
-            copiedElements++;
         }
+        if (merged == null) unionReuses++;
+        else unionGrowths++;
         return merged == null ? base : merged;
     }
 
@@ -60,6 +67,12 @@ final class ReferenceJoiner {
         metrics.count(AnalysisMetrics.Count.REFERENCE_REUSES, reuses);
         metrics.count(AnalysisMetrics.Count.REFERENCE_GROWTHS, growths);
         metrics.count(AnalysisMetrics.Count.REFERENCE_COPIED_ELEMENTS, copiedElements);
+        metrics.count(AnalysisMetrics.Count.REFERENCE_UNIONS, unions);
+        metrics.count(AnalysisMetrics.Count.REFERENCE_UNION_REUSES, unionReuses);
+        metrics.count(AnalysisMetrics.Count.REFERENCE_UNION_GROWTHS, unionGrowths);
+        metrics.count(AnalysisMetrics.Count.REFERENCE_MEMBERSHIP_CHECKS, membershipChecks);
+        metrics.count(AnalysisMetrics.Count.REFERENCE_SEALED_ELEMENTS, sealedElements);
         calls = reuses = growths = copiedElements = 0;
+        unions = unionReuses = unionGrowths = membershipChecks = sealedElements = 0;
     }
 }

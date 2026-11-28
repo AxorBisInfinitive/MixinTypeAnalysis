@@ -33,6 +33,8 @@ import java.util.Set;
  */
 public final class MethodFlow {
     private final MethodKey key;
+    private final String defaultSymbol;
+    private long pointCreations;
     private final MethodNode method;
     private final AbstractInsnNode[] instructions;
     private final Map<AbstractInsnNode, Integer> indices = new IdentityHashMap<>();
@@ -46,6 +48,7 @@ public final class MethodFlow {
 
     public MethodFlow(String owner, MethodNode method) {
         key = new MethodKey(owner, method.name, method.desc);
+        defaultSymbol = key.toString();
         this.method = method;
         instructions = method.instructions.toArray();
         for (int index = 0; index < instructions.length; index++) indices.put(instructions[index], index);
@@ -72,6 +75,9 @@ public final class MethodFlow {
     public AnalyzerException failure() { return failure; }
 
     public MethodKey key() { return key; }
+    public String defaultSymbol() { return defaultSymbol; }
+    public int originCount() { return origins.size(); }
+    public long pointCreations() { return pointCreations; }
     public MethodNode method() { return method; }
     public List<AbstractInsnNode> instructions() { return instructionView; }
     public int instructionCount() { return instructions.length; }
@@ -92,7 +98,8 @@ public final class MethodFlow {
     }
 
     public ProgramPoint point(int index) {
-        String symbol = key.toString();
+        pointCreations++;
+        String symbol = defaultSymbol;
         if (index >= 0 && index < instructions.length) {
             AbstractInsnNode instruction = instructions[index];
             if (instruction instanceof MethodInsnNode call) {

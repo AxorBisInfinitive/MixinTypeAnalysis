@@ -33,6 +33,7 @@ def startup(root):
 def profile(path):
     events = json.loads(path.read_text(encoding="utf-8-sig"))["recording"]["events"]
     allocations = collections.Counter()
+    allocation_events = collections.Counter()
     executions = collections.Counter()
     total_weight = 0
     pauses = []
@@ -47,7 +48,9 @@ def profile(path):
             executions.update(set(project))
         elif kind == "jdk.ObjectAllocationSample":
             total_weight += values["weight"]
-            allocations[project[0] if project else "outside MixinTA"] += values["weight"]
+            site = project[0] if project else "outside MixinTA"
+            allocations[site] += values["weight"]
+            allocation_events[site] += 1
         elif kind == "jdk.GarbageCollection":
             pauses.append(float(values["sumOfPauses"][2:-1]) * 1000)
         elif kind in {"jdk.JVMInformation", "jdk.GCConfiguration", "jdk.GCHeapConfiguration"}:
@@ -56,6 +59,7 @@ def profile(path):
         "eventCounts": dict(collections.Counter(event["type"] for event in events)),
         "allocationWeightBytes": total_weight,
         "allocationSites": dict(allocations.most_common()),
+        "allocationEventCounts": dict(allocation_events.most_common()),
         "inclusiveExecutionSamples": dict(executions.most_common()),
         "gcPausesMs": pauses,
         "configuration": configuration,
@@ -77,11 +81,26 @@ def containers(root):
     return result
 
 
+def workloads(root):
+    rows = json.loads((root / "measurements.json").read_text(encoding="utf-8-sig"))
+    groups = collections.defaultdict(list)
+    for row in rows:
+        groups[row["Case"], row["Version"]].append(row["Result"])
+    return {
+        case + "/" + version: {
+            key: distribution([row[key] for row in samples])
+            for key in samples[0] if key != "outcome"
+        }
+        for (case, version), samples in groups.items()
+    }
+
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--startup", type=Path, default=Path("target/performance-comparison"))
     parser.add_argument("--containers", type=Path, default=Path("target/container-performance"))
     parser.add_argument("--heap", type=Path, default=Path("target/container-heap"))
+    parser.add_argument("--workloads", type=Path)
     arguments = parser.parse_args()
     result = {
         "startup": startup(arguments.startup),
@@ -89,6 +108,8 @@ def main():
         "containers": containers(arguments.containers),
         "cacheStructures": containers(arguments.heap),
     }
+    if arguments.workloads:
+        result["workloads"] = workloads(arguments.workloads)
     output = arguments.startup / "summary.json"
     output.write_text(json.dumps(result, ensure_ascii=False, indent=2), encoding="utf-8")
     print(output)

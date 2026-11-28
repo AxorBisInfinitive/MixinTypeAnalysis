@@ -19,6 +19,44 @@ import java.util.Set;
 public final class ClassHierarchy {
     private final Map<String, ClassNode> classes;
     private final ClassByteSource resources;
+    private QueryCache queries;
+
+    private record Assignment(String destination, String source) { }
+    public record QueryStats(long calls, long hits, long failures, long nodes) { }
+    private static final class QueryCache {
+        final Map<MethodKey, MethodKey> resolutions = new HashMap<>();
+        final Map<MethodKey, MethodKey> virtuals = new HashMap<>();
+        final Map<Assignment, Boolean> assignments = new HashMap<>();
+        long calls, hits, failures, nodes;
+    }
+
+    /** 查询结果只适用于本次只读阶段，调用方在此期间不得修改 get 返回的节点。 */
+    public ClassHierarchy readOnlyQueries() {
+        ClassHierarchy snapshot = new ClassHierarchy(classes, resources);
+        snapshot.queries = new QueryCache();
+        return snapshot;
+    }
+
+    public QueryStats queryStats() {
+        return queries == null ? new QueryStats(0, 0, 0, 0)
+                : new QueryStats(queries.calls, queries.hits, queries.failures, queries.nodes);
+    }
+
+    private <K, V> V query(Map<K, V> cache, K key, java.util.function.Supplier<V> lookup) {
+        queries.calls++;
+        if (cache.containsKey(key)) {
+            queries.hits++;
+            return cache.get(key);
+        }
+        try {
+            V result = lookup.get();
+            cache.put(key, result);
+            return result;
+        } catch (RuntimeException failure) {
+            queries.failures++;
+            throw failure;
+        }
+    }
 
     public ClassHierarchy(Map<String, ClassNode> classes, ClassLoader resources) {
         this(classes, ClassByteSource.from(resources));
@@ -30,10 +68,16 @@ public final class ClassHierarchy {
     }
 
     public ClassNode get(String name) {
+        if (queries != null) queries.nodes++;
         return classes.computeIfAbsent(name, this::readResource);
     }
 
     public MethodKey resolve(String owner, String name, String descriptor) {
+        if (queries == null) return resolveUncached(owner, name, descriptor);
+        return query(queries.resolutions, new MethodKey(owner, name, descriptor), () -> resolveUncached(owner, name, descriptor));
+    }
+
+    private MethodKey resolveUncached(String owner, String name, String descriptor) {
         Set<String> visited = new HashSet<>();
         ArrayDeque<String> pending = new ArrayDeque<>();
         pending.add(owner);
@@ -63,6 +107,11 @@ public final class ClassHierarchy {
 
     /** 实例派发先选择类方法，再选择最具体接口中的唯一 default 实现。 */
     public MethodKey resolveVirtual(String owner, String name, String descriptor) {
+        if (queries == null) return resolveVirtualUncached(owner, name, descriptor);
+        return query(queries.virtuals, new MethodKey(owner, name, descriptor), () -> resolveVirtualUncached(owner, name, descriptor));
+    }
+
+    private MethodKey resolveVirtualUncached(String owner, String name, String descriptor) {
         Set<String> interfaces = new HashSet<>();
         Set<String> visited = new HashSet<>();
         String current = owner;
@@ -155,6 +204,11 @@ public final class ClassHierarchy {
     }
 
     public boolean isAssignable(String destination, String source) {
+        if (queries == null) return isAssignableUncached(destination, source);
+        return query(queries.assignments, new Assignment(destination, source), () -> isAssignableUncached(destination, source));
+    }
+
+    private boolean isAssignableUncached(String destination, String source) {
         if (destination.equals(source) || destination.equals("java/lang/Object")) {
             return true;
         }

@@ -74,6 +74,12 @@ class RepresentationStagesTest {
         assertTrue(validated.storages.values().stream().anyMatch(fact -> fact.state() == ElementState.UNKNOWN));
         assertEquals(propagation.rules(), validation.rules());
         assertEquals(originalDependencies, propagation.facts().dependencies());
+        assertSame(input.points(), propagation.facts().points());
+        assertSame(input.points(), validation.facts().points());
+        assertFalse(input.unboxes().isEmpty());
+        assertFalse(input.locals().isEmpty());
+        assertTrue(input.containerUses().stream().anyMatch(use -> use.summary() == null));
+        input.containerUses().forEach(use -> assertSame(use.summary(), input.summary(use.site(), use.call())));
         assertEquals(originalEvidence, propagation.facts().graph().evidence(propagation.facts().requested().stream()
                 .map(location -> ConstraintGraph.value(propagation.facts().points().get(location))).toList()));
         assertThrows(UnsupportedOperationException.class, () -> propagation.facts().requested().clear());

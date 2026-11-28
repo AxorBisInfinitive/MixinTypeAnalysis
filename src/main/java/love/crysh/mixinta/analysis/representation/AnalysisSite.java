@@ -18,7 +18,7 @@ record AnalysisSite(ContainerFlow flow, int index) {
     }
 
     ProgramPoint point() {
-        return new ProgramPoint(method(), index, symbol());
+        return flow.source().point(index);
     }
 
     ProgramPoint point(String detail) {

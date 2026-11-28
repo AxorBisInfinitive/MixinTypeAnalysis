@@ -54,12 +54,24 @@ public final class ContainerAnalysis {
             Set<MethodKey> targets, ClassHierarchy hierarchy,
             java.util.Collection<? extends java.util.Collection<ContainerContract>> contractGroups,
             AnalysisMetrics metrics) {
-        Builder builder = new Builder(classes, targets, hierarchy, metrics);
+        Builder builder = new Builder(classes, targets, hierarchy.readOnlyQueries(), metrics);
         Map<Set<ContainerContract>, ContainerAnalysis> completed = new LinkedHashMap<>();
-        contractGroups.stream().map(Set::copyOf).distinct()
-                .sorted(java.util.Comparator.comparing(Builder::groupKey))
-                .forEach(group -> completed.put(group, builder.analyze(group)));
-        return java.util.Collections.unmodifiableMap(completed);
+        try {
+            contractGroups.stream().map(Set::copyOf).distinct()
+                    .sorted(java.util.Comparator.comparing(Builder::groupKey))
+                    .forEach(group -> completed.put(group, builder.analyze(group)));
+            return java.util.Collections.unmodifiableMap(completed);
+        } finally {
+            var work = builder.hierarchy.queryStats();
+            metrics.count(AnalysisMetrics.Count.HIERARCHY_QUERIES, work.calls());
+            metrics.count(AnalysisMetrics.Count.HIERARCHY_HITS, work.hits());
+            metrics.count(AnalysisMetrics.Count.HIERARCHY_FAILURES, work.failures());
+            metrics.count(AnalysisMetrics.Count.HIERARCHY_NODES, work.nodes());
+            for (MethodFlow source : builder.sources.values()) {
+                metrics.count(AnalysisMetrics.Count.DEFAULT_SYMBOLS, 1);
+                metrics.count(AnalysisMetrics.Count.POINT_CREATIONS, source.pointCreations());
+            }
+        }
     }
 
     private static final class Builder {

@@ -3,7 +3,6 @@ package love.crysh.mixinta.analysis.representation;
 import love.crysh.mixinta.analysis.container.ContainerCallGraph;
 import love.crysh.mixinta.analysis.container.ContainerEffects;
 import love.crysh.mixinta.analysis.container.ContainerFlow;
-import love.crysh.mixinta.analysis.container.ContainerRules;
 import love.crysh.mixinta.analysis.container.MethodContainerSummary;
 import love.crysh.mixinta.analysis.container.StorageId;
 import love.crysh.mixinta.analysis.container.StorageSlot;
@@ -48,7 +47,6 @@ final class RepresentationValidator {
     private final Map<MethodKey, Migration> targets;
     private final Map<String, ClassNode> classes;
     private final ClassHierarchy hierarchy;
-    private final ContainerRules containers;
     private final List<ContainerFlow> flows;
     private final Map<AbstractInsnNode, AnalysisSite> sites;
     private final Set<AbstractInsnNode> migrated;
@@ -77,7 +75,6 @@ final class RepresentationValidator {
         this.hierarchy = hierarchy;
         this.batch = batch;
         representation = migration.representation();
-        containers = new ContainerRules(migration.containers());
         flows = input.flows();
         sites = input.sites();
         migrated = input.nodes(facts.migrated());
@@ -173,7 +170,7 @@ final class RepresentationValidator {
                     int arguments = Type.getArgumentTypes(dynamic.desc).length;
                     for (int parameter = 0; parameter < arguments; parameter++) {
                         OriginValue value = flow.source().stack(index, flow.source().stackSize(index) - arguments + parameter);
-                        if (touches(value, migrated) && !nullOnly(value)) {
+                        if (input.work.touches(value, migrated) && !nullOnly(value)) {
                             var use = ConstraintGraph.capture(site.point(), parameter);
                             linkUse(use, value);
                             problems.candidateProblem("UNSUPPORTED_VALUE_USE", site, parameter,
@@ -185,10 +182,10 @@ final class RepresentationValidator {
                     checkReference(constant.cst, site);
                 } else if (instruction.getOpcode() == Opcodes.ARETURN || instruction.getOpcode() == Opcodes.PUTSTATIC
                         || instruction.getOpcode() == Opcodes.PUTFIELD || instruction.getOpcode() == Opcodes.AASTORE) {
-                    if (touches(flow.source().top(index), migrated) && !nullOnly(flow.source().top(index))) {
+                    if (input.work.touches(flow.source().top(index), migrated) && !nullOnly(flow.source().top(index))) {
                         problems.problem("UNSUPPORTED_REFERENCE_USE", site, pathFor(flow.source().top(index)) + " <- reference sink at " + site.describe());
                     }
-                } else if (instruction.getOpcode() == Opcodes.LRETURN && touches(flow.source().top(index), migrated)) {
+                } else if (instruction.getOpcode() == Opcodes.LRETURN && input.work.touches(flow.source().top(index), migrated)) {
                     requireEncoder(site);
                 } else if (!(instruction instanceof VarInsnNode)
                         && instruction.getOpcode() != Opcodes.POP
@@ -226,15 +223,15 @@ final class RepresentationValidator {
         if (isUnbox(call) && migrated.contains(call)) {
             helper(TypeRule.Kind.READ, site);
         }
-        if (receiverPresent && touches(flow.source().receiver(index, call), migrated)
+        if (receiverPresent && input.work.touches(flow.source().receiver(index, call), migrated)
                 && !nullOnly(flow.source().receiver(index, call))
                 && !(isUnbox(call) && migrated.contains(call))) {
             problemUse("UNSUPPORTED_REFERENCE_USE", site, ConstraintGraph.receiver(site.point()), flow.source().receiver(index, call),
                     "receiver", pathFor(flow.source().receiver(index, call)) + " <- receiver of " + symbol(call));
         }
-        if (selected.containsKey(call) && ((receiverPresent && touches(flow.source().receiver(index, call), migrated))
+        if (selected.containsKey(call) && ((receiverPresent && input.work.touches(flow.source().receiver(index, call), migrated))
                 || java.util.stream.IntStream.range(0, Type.getArgumentTypes(call.desc).length)
-                .anyMatch(parameter -> touches(flow.source().argument(index, call, parameter), migrated)))) {
+                .anyMatch(parameter -> input.work.touches(flow.source().argument(index, call, parameter), migrated)))) {
             problems.problem("MIGRATED_SOURCE_INPUT_NOT_IMPLEMENTED", site, "Source replacement consumes another migrated value");
         }
         Type[] arguments = Type.getArgumentTypes(call.desc);
@@ -242,7 +239,7 @@ final class RepresentationValidator {
             int parameterIndex = parameter;
             OriginValue value = flow.source().argument(index, call, parameter);
             linkUse(site, parameter, value);
-            if (!touches(value, migrated)) {
+            if (!input.work.touches(value, migrated)) {
                 continue;
             }
             if (nullOnly(value) && (arguments[parameter].getSort() == Type.OBJECT || arguments[parameter].getSort() == Type.ARRAY)) continue;
@@ -253,7 +250,7 @@ final class RepresentationValidator {
                     || compatibleWrite(site, call, parameter)) {
                 continue;
             }
-            if (arguments[parameter].equals(Type.LONG_TYPE) || isMapComparison(site, call, parameter, containers)) {
+            if (arguments[parameter].equals(Type.LONG_TYPE) || isMapComparison(site, call, parameter, input)) {
                 helper(TypeRule.Kind.ENCODE, site, parameter);
             } else {
                 problems.candidateProblem("UNSUPPORTED_REFERENCE_USE", site, parameter, pathFor(value) + " <- argument of " + symbol(call), List.of());
@@ -266,10 +263,10 @@ final class RepresentationValidator {
     }
 
     private boolean compatibleWrite(AnalysisSite site, MethodInsnNode call, int parameter) {
-        if (!isContainerWrite(site, call, parameter, containers)) return false;
+        if (!isContainerWrite(site, call, parameter, input)) return false;
         OriginValue value = site.flow().source().argument(site.index(), call, parameter);
         if (nullOnly(value)) return true;
-        var summary = summary(site, call, containers);
+        var summary = input.summary(site, call);
         var references = site.flow().receiverReferences(site.index(), call);
         var slots = references.slots(summary.channel());
         return !slots.isEmpty() && references.unknownOrigins().isEmpty() && slots.stream()

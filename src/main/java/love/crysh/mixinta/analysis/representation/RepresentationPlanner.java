@@ -2,7 +2,6 @@ package love.crysh.mixinta.analysis.representation;
 
 import love.crysh.mixinta.analysis.container.ContainerFlow;
 import love.crysh.mixinta.analysis.container.ContainerReference;
-import love.crysh.mixinta.analysis.container.ContainerRules;
 import love.crysh.mixinta.analysis.container.ContainerSummary;
 import love.crysh.mixinta.analysis.container.JdkContainerSummaries;
 import love.crysh.mixinta.analysis.container.StorageReferences;
@@ -48,7 +47,7 @@ final class RepresentationPlanner {
     private final Map<MethodKey, Migration> targets;
     private final Map<String, ClassNode> classes;
     private final ClassHierarchy hierarchy;
-    private final ContainerRules containers;
+    private final RepresentationInput input;
     private final List<ContainerFlow> flows;
     private final Map<AbstractInsnNode, AnalysisSite> sites;
     private final Set<AbstractInsnNode> migrated;
@@ -67,6 +66,7 @@ final class RepresentationPlanner {
 
     RepresentationPlanner(List<RepresentationMigration> migrations, RepresentationInput input, ValidationResult validated,
             Map<MethodKey, Migration> targets, Map<String, ClassNode> classes, ClassHierarchy hierarchy, ElementFacts batch) {
+        this.input = input;
         var result = validated.facts();
         this.migrations = List.copyOf(migrations);
         migration = migrations.getFirst();
@@ -74,7 +74,6 @@ final class RepresentationPlanner {
         this.classes = classes;
         this.hierarchy = hierarchy;
         this.batch = batch;
-        containers = new ContainerRules(migration.containers());
         representation = migration.representation();
         flows = input.flows();
         sites = input.sites();
@@ -109,13 +108,13 @@ final class RepresentationPlanner {
             AbstractInsnNode instruction = flow.source().instruction(index);
             AnalysisSite site = new AnalysisSite(flow, index);
             if (instruction instanceof VarInsnNode variable) {
-                if (variable.getOpcode() == Opcodes.LLOAD && touches(flow.source().local(index, variable.var), migrated)) {
+                if (variable.getOpcode() == Opcodes.LLOAD && input.work.touches(flow.source().local(index, variable.var), migrated)) {
                     edit(site, RepresentationPlan.Action.LOAD_REFERENCE, null);
-                } else if (variable.getOpcode() == Opcodes.LSTORE && touches(flow.source().top(index), migrated)) {
+                } else if (variable.getOpcode() == Opcodes.LSTORE && input.work.touches(flow.source().top(index), migrated)) {
                     edit(site, RepresentationPlan.Action.STORE_REFERENCE, null);
                 }
             } else if (instruction instanceof TypeInsnNode cast && cast.getOpcode() == Opcodes.CHECKCAST
-                    && cast.desc.equals("java/lang/Long") && touches(flow.source().top(index), migrated)) {
+                    && cast.desc.equals("java/lang/Long") && input.work.touches(flow.source().top(index), migrated)) {
                 if (!nullOnly(flow.source().top(index))) edit(site, RepresentationPlan.Action.CAST_REFERENCE, null);
             } else if (instruction instanceof MethodInsnNode call) {
                 if (selected.containsKey(call)) {
@@ -131,9 +130,9 @@ final class RepresentationPlanner {
                     edits.add(new RepresentationPlan.Edit(location(site), action, accessibleHelper(encoder.helper(), site, source),
                             representation, TypeRule.Binding.RECEIVER, 0, source));
                     changes.add(PlanChange.of(flow.source().key(), index, action.planAction(), migration.id(), encoder.id()));
-                    int parameter = summary(site, call, containers).observedParameter();
+                    int parameter = input.summary(site, call).observedParameter();
                     var value = flow.source().argument(index, call, parameter);
-                    if (touches(value, migrated) && !nullOnly(value)) {
+                    if (input.work.touches(value, migrated) && !nullOnly(value)) {
                         var queryEncoder = helper(TypeRule.Kind.ENCODE, site, parameter);
                         var querySource = sourceRequirement(List.of(ConstraintGraph.use(site.point(), parameter)));
                         arguments.add(new RepresentationPlan.Argument(location(site), symbol(call), symbol(call), parameter,
@@ -149,7 +148,7 @@ final class RepresentationPlanner {
                                 declaration.target().equals(target.original()) && declaration.parameter() == parameterIndex);
                         boolean matchingTarget = target != null && target.representations().stream().anyMatch(declaration ->
                                 declaration.parameter() == parameterIndex);
-                        if (!touches(flow.source().argument(index, call, parameter), migrated) && !ownTarget) {
+                        if (!input.work.touches(flow.source().argument(index, call, parameter), migrated) && !ownTarget) {
                             continue;
                         }
                         if (nullOnly(flow.source().argument(index, call, parameter))
@@ -168,7 +167,7 @@ final class RepresentationPlanner {
                                 migration.id(), encoder == null ? "" : encoder.id()));
                     }
                 }
-            } else if (instruction.getOpcode() == Opcodes.LRETURN && touches(flow.source().top(index), migrated)) {
+            } else if (instruction.getOpcode() == Opcodes.LRETURN && input.work.touches(flow.source().top(index), migrated)) {
                 edit(site, RepresentationPlan.Action.ENCODE_RETURN, helper(TypeRule.Kind.ENCODE, site));
             }
         }
@@ -229,7 +228,7 @@ final class RepresentationPlanner {
                     continue;
                 }
                 OriginValue value = flow.source().local(index, variable.index);
-                if ((variable.desc.equals("J") || variable.desc.equals("Ljava/lang/Long;")) && touches(value, migrated)) {
+                if ((variable.desc.equals("J") || variable.desc.equals("Ljava/lang/Long;")) && input.work.touches(value, migrated)) {
                     if (nullOnly(value)) continue;
                     Set<ConstraintGraph.Subject> origins = value.origins().stream().filter(migrated::contains).map(sites::get).filter(java.util.Objects::nonNull)
                             .map(origin -> ConstraintGraph.value(origin.point())).collect(java.util.stream.Collectors.toSet());
@@ -318,10 +317,10 @@ final class RepresentationPlanner {
     }
 
     private boolean compatibleWrite(AnalysisSite site, MethodInsnNode call, int parameter) {
-        if (!isContainerWrite(site, call, parameter, containers)) return false;
+        if (!isContainerWrite(site, call, parameter, input)) return false;
         OriginValue value = site.flow().source().argument(site.index(), call, parameter);
         if (nullOnly(value)) return true;
-        var summary = summary(site, call, containers);
+        var summary = input.summary(site, call);
         var references = site.flow().receiverReferences(site.index(), call);
         var slots = references.slots(summary.channel());
         return !slots.isEmpty() && references.unknownOrigins().isEmpty() && slots.stream()
@@ -333,7 +332,7 @@ final class RepresentationPlanner {
     }
 
     private boolean isMigratedObservation(ContainerFlow flow, int index, MethodInsnNode call) {
-        ContainerSummary summary = summary(new AnalysisSite(flow, index), call, containers);
+        ContainerSummary summary = input.summary(new AnalysisSite(flow, index), call);
         return summary != null && summary.observedParameter() >= 0 && touchesChannel(flow.receiverReferences(index, call), summary.channel());
     }
 
