@@ -34,6 +34,11 @@ class MethodFlowTest {
         assertFalse(flow.reachable(6));
         assertSame(call, flow.instruction(3));
         assertEquals(3, flow.indexOf(call));
+        assertSame(flow.indices(), flow.indices());
+        assertEquals(3, flow.indices().get(call));
+        var missing = new InsnNode(Opcodes.NOP);
+        assertNull(flow.indices().get(missing));
+        assertEquals(-1, flow.indexOf(missing));
         assertEquals(2, flow.argument(3, call, 0).width());
         assertEquals(-1, flow.indexOf(flow.argument(3, call, 0).origins().iterator().next()));
         assertEquals(-3, flow.indexOf(flow.receiver(3, call).origins().iterator().next()));
@@ -45,6 +50,38 @@ class MethodFlowTest {
         assertThrows(UnsupportedOperationException.class, () -> flow.top(5).origins().clear());
         assertThrows(UnsupportedOperationException.class, () -> flow.consumed(flow.instruction(5)).clear());
         assertThrows(UnsupportedOperationException.class, () -> flow.inputs(flow.instruction(4)).getFirst().origins().clear());
+    }
+
+    @Test
+    void freezesReceiverAndWideParametersAfterAnalysis() {
+        var method = new MethodNode(Opcodes.ACC_PUBLIC, "run", "(JD)V", null, null);
+        method.instructions.add(new InsnNode(Opcodes.RETURN));
+        method.maxLocals = 5;
+        var flow = new MethodFlow("sample/Subject", method);
+
+        assertNull(flow.failure());
+        assertEquals(-1, flow.indices().get(flow.local(0, 0).origins().iterator().next()));
+        assertEquals(-2, flow.indices().get(flow.local(0, 1).origins().iterator().next()));
+        assertEquals(-4, flow.indices().get(flow.local(0, 3).origins().iterator().next()));
+        assertEquals(4, flow.indices().size());
+    }
+
+    @Test
+    void freezesRegisteredIndicesWhenAnalysisFails() {
+        var method = new MethodNode(Opcodes.ACC_STATIC, "broken", "(J)V", null, null);
+        var pop = new InsnNode(Opcodes.POP);
+        method.instructions.add(pop);
+        method.instructions.add(new InsnNode(Opcodes.RETURN));
+        method.maxLocals = 2;
+        method.maxStack = 1;
+        var flow = new MethodFlow("sample/Subject", method);
+
+        assertNotNull(flow.failure());
+        assertFalse(flow.reachable(0));
+        assertSame(flow.indices(), flow.indices());
+        assertEquals(0, flow.indices().get(pop));
+        assertTrue(flow.indices().containsValue(-1));
+        assertThrows(UnsupportedOperationException.class, () -> flow.indices().put(pop, 9));
     }
 
     @Test

@@ -36,6 +36,7 @@ public final class MethodFlow {
     private final MethodNode method;
     private final AbstractInsnNode[] instructions;
     private final Map<AbstractInsnNode, Integer> indices = new IdentityHashMap<>();
+    private final Map<AbstractInsnNode, Integer> indexSnapshot;
     private final Map<AbstractInsnNode, Set<AbstractInsnNode>> consumed = new IdentityHashMap<>();
     private final Map<AbstractInsnNode, Map<Integer, Set<AbstractInsnNode>>> consumedInputs = new IdentityHashMap<>();
     private final Frame<SourceValue>[] frames;
@@ -65,6 +66,7 @@ public final class MethodFlow {
                 for (int slot = 0; slot < frame.getStackSize(); slot++) origin(frame.getStack(slot));
             }
         }
+        indexSnapshot = Map.copyOf(indices);
     }
 
     public AnalyzerException failure() { return failure; }
@@ -75,7 +77,7 @@ public final class MethodFlow {
     public int instructionCount() { return instructions.length; }
     public AbstractInsnNode instruction(int index) { return instructions[index]; }
     public int indexOf(AbstractInsnNode instruction) { return indices.getOrDefault(instruction, -1); }
-    public Map<AbstractInsnNode, Integer> indices() { return Map.copyOf(indices); }
+    public Map<AbstractInsnNode, Integer> indices() { return indexSnapshot; }
     public boolean reachable(int index) { return frames != null && frames[index] != null; }
     public int localCount(int index) { return frames[index].getLocals(); }
     public int stackSize(int index) { return frames[index].getStackSize(); }

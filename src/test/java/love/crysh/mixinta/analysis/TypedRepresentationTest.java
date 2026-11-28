@@ -44,6 +44,7 @@ class TypedRepresentationTest {
         method.visitEnd();
         malformed.visitEnd();
         merged.put("sample/Unrelated", malformed.toByteArray());
+        love.crysh.mixinta.testsupport.AnalysisComparison.capture(fixture.originals(), fixture.mixins(), merged);
 
         var failure = assertThrows(TypedOverwriteException.class, () -> prepared.analyze(merged));
         var location = new MethodKey("sample/Unrelated", "broken", "()V");

@@ -1,5 +1,6 @@
 package love.crysh.mixinta.analysis.container;
 
+import love.crysh.mixinta.analysis.AnalysisMetrics;
 import love.crysh.mixinta.analysis.flow.OriginValue;
 import love.crysh.mixinta.bytecode.ClassFiles;
 import love.crysh.mixinta.bytecode.ClassHierarchy;
@@ -38,6 +39,13 @@ public final class ContainerCallGraph {
     }
 
     private static final StorageReferences EMPTY = new StorageReferences(Set.of(), Set.of(), false);
+    private final AnalysisMetrics metrics;
+    private long rounds;
+    private long callVisits;
+    private long dispatches;
+    private long factUpdates;
+    private final ReferenceJoiner joiner = new ReferenceJoiner();
+    private final Map<ProgramPoint, StorageReferences> unknowns = new LinkedHashMap<>();
     private final Map<String, ClassNode> classes;
     private final ClassHierarchy hierarchy;
     private final ContainerRules containers;
@@ -56,137 +64,193 @@ public final class ContainerCallGraph {
     private final Map<String, List<ClassNode>> receiverClasses = new LinkedHashMap<>();
 
     ContainerCallGraph(Map<String, ClassNode> classes, List<ContainerFlow> methods, ClassHierarchy hierarchy, ContainerRules containers) {
+        this(classes, methods, hierarchy, containers, new AnalysisMetrics());
+    }
+
+    ContainerCallGraph(Map<String, ClassNode> classes, List<ContainerFlow> methods, ClassHierarchy hierarchy,
+            ContainerRules containers, AnalysisMetrics metrics) {
         this.classes = classes;
         this.hierarchy = hierarchy;
         this.containers = containers;
-        for (ContainerFlow flow : methods) {
-            flows.put(flow.source().key(), flow);
-            var analyzer = new ContainerMethodAnalyzer(flow, containers);
-            analyzers.put(flow.source().key(), analyzer);
-            summaries.put(flow.source().key(), analyzer.analyze());
-        }
-        for (ClassNode owner : classes.values()) {
-            for (var method : owner.methods) {
-                if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
-                    MethodKey key = new MethodKey(owner.name, method.name, method.desc);
-                    summaries.put(key, ContainerMethodAnalyzer.unavailable(key, method.access));
+        this.metrics = metrics;
+        long summaryStarted = System.nanoTime();
+        try {
+            for (ContainerFlow flow : methods) {
+                flows.put(flow.source().key(), flow);
+                var analyzer = new ContainerMethodAnalyzer(flow, containers);
+                analyzers.put(flow.source().key(), analyzer);
+                summaries.put(flow.source().key(), analyzer.analyze());
+            }
+            for (ClassNode owner : classes.values()) {
+                for (var method : owner.methods) {
+                    if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
+                        MethodKey key = new MethodKey(owner.name, method.name, method.desc);
+                        summaries.put(key, ContainerMethodAnalyzer.unavailable(key, method.access));
+                    }
                 }
             }
+        } finally {
+            metrics.add(AnalysisMetrics.Stage.CONTAINER_SUMMARIES, System.nanoTime() - summaryStarted);
         }
-        for (MethodContainerSummary summary : summaries.values()) {
-            for (var call : summary.calls()) {
-                if (call.intrinsic() == null) {
-                    calls.put(call.point(), call);
-                    potential.put(call.point(), potentialTargets(call));
-                    if (isReference(Type.getReturnType(call.target().descriptor()))) {
+        long callsStarted = System.nanoTime();
+        try {
+            for (MethodContainerSummary summary : summaries.values()) {
+                for (var call : summary.calls()) {
+                    if (call.intrinsic() == null) {
+                        calls.put(call.point(), call);
+                        potential.put(call.point(), potentialTargets(call));
+                        if (isReference(Type.getReturnType(call.target().descriptor()))) {
+                            results.put(call.point(), EMPTY);
+                        }
+                    } else if (call.intrinsic().view() != null || call.target().owner().equals("java/util/Iterator")
+                            && call.target().name().equals("next")) {
+                        derived.put(call.point(), call);
                         results.put(call.point(), EMPTY);
                     }
-                } else if (call.intrinsic().view() != null || call.target().owner().equals("java/util/Iterator")
-                        && call.target().name().equals("next")) {
-                    derived.put(call.point(), call);
-                    results.put(call.point(), EMPTY);
                 }
             }
-        }
-        for (ContainerFlow flow : methods) {
-            for (var instruction : flow.source().instructions()) {
-                if (instruction instanceof LdcInsnNode constant) {
-                    reference(constant.cst);
-                } else if (instruction instanceof InvokeDynamicInsnNode dynamic) {
-                    reference(dynamic.bsm);
-                    for (Object argument : dynamic.bsmArgs) reference(argument);
+            for (ContainerFlow flow : methods) {
+                for (var instruction : flow.source().instructions()) {
+                    if (instruction instanceof LdcInsnNode constant) {
+                        reference(constant.cst);
+                    } else if (instruction instanceof InvokeDynamicInsnNode dynamic) {
+                        reference(dynamic.bsm);
+                        for (Object argument : dynamic.bsmArgs) reference(argument);
+                    }
                 }
             }
-        }
-        Set<MethodKey> callable = new LinkedHashSet<>();
-        potential.values().forEach(callable::addAll);
-        for (MethodContainerSummary summary : summaries.values()) {
-            if (!summary.hasBody()) continue;
-            List<Integer> parameters = new ArrayList<>();
-            if ((summary.access() & Opcodes.ACC_STATIC) == 0) parameters.add(-1);
-            summary.parameters().forEach(parameter -> parameters.add(parameter.index()));
-            for (int parameter : parameters) {
-                Binding binding = new Binding(summary.method(), parameter);
-                inputs.put(binding, !callable.contains(summary.method()) || openEntries.contains(summary.method())
-                        ? unknown(bindingPoint(binding)) : EMPTY);
+            Set<MethodKey> callable = new LinkedHashSet<>();
+            potential.values().forEach(callable::addAll);
+            for (MethodContainerSummary summary : summaries.values()) {
+                if (!summary.hasBody()) continue;
+                List<Integer> parameters = new ArrayList<>();
+                if ((summary.access() & Opcodes.ACC_STATIC) == 0) parameters.add(-1);
+                summary.parameters().forEach(parameter -> parameters.add(parameter.index()));
+                for (int parameter : parameters) {
+                    Binding binding = new Binding(summary.method(), parameter);
+                    inputs.put(binding, !callable.contains(summary.method()) || openEntries.contains(summary.method())
+                            ? unknown(bindingPoint(binding)) : EMPTY);
+                }
             }
+        } finally {
+            metrics.add(AnalysisMetrics.Stage.CONTAINER_CALLS, System.nanoTime() - callsStarted);
         }
     }
 
     void solve() {
-        converge();
-        // 无种子的递归环不能被解释为已知空引用或空容器。
-        inputs.replaceAll((binding, facts) -> empty(facts) ? unknown(bindingPoint(binding)) : facts);
-        results.replaceAll((point, facts) -> empty(facts) ? unknown(point) : facts);
-        converge();
-        for (var call : calls.values()) {
-            for (MethodKey target : dispatch(call).targets()) {
-                incoming.computeIfAbsent(target, ignored -> new LinkedHashSet<>()).add(call.point());
-            }
+        converge(true);
+        long unknownStarted = System.nanoTime();
+        try {
+            // 无种子的递归环不能被解释为已知空引用或空容器。
+            inputs.replaceAll((binding, facts) -> empty(facts) ? unknown(bindingPoint(binding)) : facts);
+            results.replaceAll((point, facts) -> empty(facts) ? unknown(point) : facts);
+        } finally {
+            metrics.add(AnalysisMetrics.Stage.CONTAINER_UNKNOWN, System.nanoTime() - unknownStarted);
         }
-        ArrayDeque<MethodKey> pending = new ArrayDeque<>();
-        flows.keySet().stream().filter(method -> !incoming.containsKey(method)).forEach(pending::add);
-        while (!pending.isEmpty()) {
-            MethodKey method = pending.removeFirst();
-            if (!rooted.add(method)) continue;
-            for (var call : summaries.get(method).calls()) {
-                if (calls.containsKey(call.point())) pending.addAll(dispatch(call).targets().stream().filter(flows::containsKey).toList());
+        converge(false);
+        long relationshipsStarted = System.nanoTime();
+        try {
+            for (var call : calls.values()) {
+                for (MethodKey target : dispatch(call).targets()) {
+                    incoming.computeIfAbsent(target, ignored -> new LinkedHashSet<>()).add(call.point());
+                }
             }
+            ArrayDeque<MethodKey> pending = new ArrayDeque<>();
+            flows.keySet().stream().filter(method -> !incoming.containsKey(method)).forEach(pending::add);
+            while (!pending.isEmpty()) {
+                MethodKey method = pending.removeFirst();
+                if (!rooted.add(method)) continue;
+                for (var call : summaries.get(method).calls()) {
+                    if (calls.containsKey(call.point())) pending.addAll(dispatch(call).targets().stream().filter(flows::containsKey).toList());
+                }
+            }
+        } finally {
+            metrics.add(AnalysisMetrics.Stage.CONTAINER_RELATIONSHIPS, System.nanoTime() - relationshipsStarted);
         }
-        for (ContainerFlow flow : flows.values()) {
-            flow.initializeAliases(new ContainerAliases(flow.source(), source -> references(flow.source().key(), source)));
+        long aliasesStarted = System.nanoTime();
+        try {
+            for (ContainerFlow flow : flows.values()) {
+                var aliases = new ContainerAliases(flow.source(), source -> references(flow.source().key(), source));
+                flow.initializeAliases(aliases);
+                metrics.count(AnalysisMetrics.Count.ALIAS_POSITIONS, aliases.positionCount());
+                metrics.count(AnalysisMetrics.Count.ALIAS_VALUES, aliases.valueCount());
+            }
+        } finally {
+            metrics.add(AnalysisMetrics.Stage.CONTAINER_ALIASES, System.nanoTime() - aliasesStarted);
         }
     }
 
-    private void converge() {
-        boolean changed;
-        do {
-            changed = false;
-            for (var call : calls.values()) {
-                Dispatch dispatch = dispatch(call);
-                for (MethodKey target : dispatch.targets()) {
-                    MethodContainerSummary summary = summaries.get(target);
-                    if (summary == null || !summary.hasBody()) continue;
-                    if (call.receiver() != null) {
-                        changed |= bind(new Binding(target, -1), resolve(call.point().method(), call.receiver()));
-                    }
-                    for (int parameter = 0; parameter < call.arguments().size(); parameter++) {
-                        changed |= bind(new Binding(target, parameter), resolve(call.point().method(), call.arguments().get(parameter)));
-                    }
-                }
-                if (results.containsKey(call.point())) {
-                    StorageReferences returned = EMPTY;
+    void recordMetrics() {
+        joiner.recordMetrics(metrics);
+        metrics.count(AnalysisMetrics.Count.UNKNOWN_VALUES, unknowns.size());
+    }
+
+    private void converge(boolean first) {
+        long started = System.nanoTime();
+        long dispatchBefore = dispatches;
+        rounds = callVisits = factUpdates = 0;
+        try {
+            boolean changed;
+            do {
+                rounds++;
+                changed = false;
+                for (var call : calls.values()) {
+                    callVisits++;
+                    Dispatch dispatch = dispatch(call);
                     for (MethodKey target : dispatch.targets()) {
                         MethodContainerSummary summary = summaries.get(target);
-                        if (summary != null && summary.hasBody()) {
-                            for (var value : summary.returns()) returned = join(returned, resolve(target, value.value()));
+                        if (summary == null || !summary.hasBody()) continue;
+                        if (call.receiver() != null) {
+                            changed |= bind(new Binding(target, -1), resolve(call.point().method(), call.receiver()));
+                        }
+                        for (int parameter = 0; parameter < call.arguments().size(); parameter++) {
+                            changed |= bind(new Binding(target, parameter), resolve(call.point().method(), call.arguments().get(parameter)));
                         }
                     }
-                    if (!dispatch.covered() && !dispatch.pending()) returned = join(returned, unknown(call.point()));
+                    if (results.containsKey(call.point())) {
+                        StorageReferences returned = EMPTY;
+                        for (MethodKey target : dispatch.targets()) {
+                            MethodContainerSummary summary = summaries.get(target);
+                            if (summary != null && summary.hasBody()) {
+                                for (var value : summary.returns()) returned = join(returned, resolve(target, value.value()));
+                            }
+                        }
+                        if (!dispatch.covered() && !dispatch.pending()) returned = join(returned, unknown(call.point()));
+                        StorageReferences previous = results.get(call.point());
+                        StorageReferences next = join(previous, returned);
+                        if (!previous.equals(next)) {
+                            results.put(call.point(), next);
+                            factUpdates++;
+                            changed = true;
+                        }
+                    }
+                }
+                for (var call : derived.values()) {
+                    callVisits++;
+                    StorageReferences receiver = resolve(call.point().method(), call.receiver());
+                    StorageReferences returned = EMPTY;
+                    if (!empty(receiver)) {
+                        ContainerView view = call.intrinsic().view();
+                        if (view == null) view = ContainerView.ENTRY;
+                        returned = view.derive(receiver, call.point(), call.intrinsic().channel());
+                    }
                     StorageReferences previous = results.get(call.point());
                     StorageReferences next = join(previous, returned);
                     if (!previous.equals(next)) {
                         results.put(call.point(), next);
+                        factUpdates++;
                         changed = true;
                     }
                 }
-            }
-            for (var call : derived.values()) {
-                StorageReferences receiver = resolve(call.point().method(), call.receiver());
-                StorageReferences returned = EMPTY;
-                if (!empty(receiver)) {
-                    ContainerView view = call.intrinsic().view();
-                    if (view == null) view = ContainerView.ENTRY;
-                    returned = view.derive(receiver, call.point(), call.intrinsic().channel());
-                }
-                StorageReferences previous = results.get(call.point());
-                StorageReferences next = join(previous, returned);
-                if (!previous.equals(next)) {
-                    results.put(call.point(), next);
-                    changed = true;
-                }
-            }
-        } while (changed);
+            } while (changed);
+        } finally {
+            metrics.add(first ? AnalysisMetrics.Stage.CONTAINER_FIRST_CONVERGENCE
+                    : AnalysisMetrics.Stage.CONTAINER_SECOND_CONVERGENCE, System.nanoTime() - started);
+            metrics.count(first ? AnalysisMetrics.Count.FIRST_ROUNDS : AnalysisMetrics.Count.SECOND_ROUNDS, rounds);
+            metrics.count(first ? AnalysisMetrics.Count.FIRST_CALL_VISITS : AnalysisMetrics.Count.SECOND_CALL_VISITS, callVisits);
+            metrics.count(first ? AnalysisMetrics.Count.FIRST_DISPATCHES : AnalysisMetrics.Count.SECOND_DISPATCHES, dispatches - dispatchBefore);
+            metrics.count(first ? AnalysisMetrics.Count.FIRST_FACT_UPDATES : AnalysisMetrics.Count.SECOND_FACT_UPDATES, factUpdates);
+        }
     }
 
     private boolean bind(Binding binding, StorageReferences value) {
@@ -195,11 +259,12 @@ public final class ContainerCallGraph {
         StorageReferences next = join(previous, value);
         if (previous.equals(next)) return false;
         inputs.put(binding, next);
+        factUpdates++;
         return true;
     }
 
     public StorageReferences references(MethodKey method, OriginValue source) {
-    return resolve(method, analyzers.get(method).value(source, flows.get(method).source().point(-1)));
+        return resolve(method, analyzers.get(method).value(source, flows.get(method).source().point(-1)));
     }
 
     public StorageReferences resolve(MethodKey method, MethodContainerSummary.Value value) {
@@ -210,7 +275,10 @@ public final class ContainerCallGraph {
                         allocation.storage(), -1, ContainerReference.Kind.ROOT)), Set.of(), false);
                 case MethodContainerSummary.Parameter parameter -> inputs.getOrDefault(new Binding(method, parameter.index()), EMPTY);
                 case MethodContainerSummary.Receiver ignored -> inputs.getOrDefault(new Binding(method, -1), EMPTY);
-                case MethodContainerSummary.Producer producer -> results.getOrDefault(producer.point(), unknown(producer.point()));
+                case MethodContainerSummary.Producer producer -> {
+                    StorageReferences facts = results.get(producer.point());
+                    yield facts == null ? unknown(producer.point()) : facts;
+                }
             };
             result = join(result, reference);
         }
@@ -236,6 +304,7 @@ public final class ContainerCallGraph {
     }
 
     private Dispatch dispatch(MethodContainerSummary.Call call) {
+        dispatches++;
         if (call.receiver() != null && call.intrinsic() == null) {
             MethodInsnNode instruction = (MethodInsnNode) flows.get(call.point().method()).source().instruction(call.point().instruction());
             StorageReferences receiver = resolve(call.point().method(), call.receiver());
@@ -412,23 +481,19 @@ public final class ContainerCallGraph {
         }
     }
 
-    private static StorageReferences unknown(ProgramPoint point) {
-        return new StorageReferences(Set.of(), Set.of(point), false);
+    private StorageReferences unknown(ProgramPoint point) {
+        return unknowns.computeIfAbsent(point, origin -> new StorageReferences(Set.of(), Set.of(origin), false));
     }
 
     private static boolean empty(StorageReferences facts) {
-        return facts.storages().isEmpty() && facts.unknownOrigins().isEmpty() && !facts.nullable();
+        return ReferenceJoiner.empty(facts);
     }
 
     private static boolean isReference(Type type) {
         return type.getSort() == Type.OBJECT || type.getSort() == Type.ARRAY;
     }
 
-    private static StorageReferences join(StorageReferences first, StorageReferences second) {
-        Set<ContainerReference> references = new LinkedHashSet<>(first.references());
-        references.addAll(second.references());
-        Set<ProgramPoint> unknown = new LinkedHashSet<>(first.unknownOrigins());
-        unknown.addAll(second.unknownOrigins());
-        return new StorageReferences(references, unknown, first.nullable() || second.nullable());
+    private StorageReferences join(StorageReferences first, StorageReferences second) {
+        return joiner.join(first, second);
     }
 }

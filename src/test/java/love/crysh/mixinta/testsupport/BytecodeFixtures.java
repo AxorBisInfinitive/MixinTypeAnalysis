@@ -135,6 +135,7 @@ public final class BytecodeFixtures {
             }
             classes.put(owner, ClassFiles.write(target));
         }
+        AnalysisComparison.capture(fixture.originals(), fixture.mixins(), classes);
         return classes;
     }
 
@@ -171,6 +172,7 @@ public final class BytecodeFixtures {
 
     public record Fixture(Map<String, byte[]> originals, Map<String, byte[]> mixins) {
         public PreparedOverwrites prepare() {
+            AnalysisComparison.capture(originals, mixins, null);
             return new TypedOverwriteAnalyzer().prepare(originals, mixins);
         }
 

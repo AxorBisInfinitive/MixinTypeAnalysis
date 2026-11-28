@@ -2,10 +2,12 @@ package love.crysh.mixinta.analysis.container;
 
 import love.crysh.mixinta.bytecode.ClassFiles;
 import love.crysh.mixinta.bytecode.ClassHierarchy;
+import love.crysh.mixinta.analysis.AnalysisMetrics;
 import love.crysh.mixinta.model.MethodKey;
 import love.crysh.mixinta.testsupport.BytecodeFixtures;
 
 import org.junit.jupiter.api.Test;
+import org.objectweb.asm.Opcodes;
 import org.objectweb.asm.tree.ClassNode;
 
 import java.util.LinkedHashMap;
@@ -94,8 +96,9 @@ class ContainerAnalysisTest {
         var read = new ContainerContract("read", 1, new MethodKey("sample/Subject$Box", "get", "()Ljava/lang/Object;"),
                 new ContainerSummary(ContainerOperation.READ, 0, -1));
 
+        var metrics = new AnalysisMetrics();
         var groups = ContainerAnalysis.analyzeAll(nodes, Set.of(), hierarchy,
-                List.of(List.of(), List.of(allocation, read), List.of(read, allocation)));
+                List.of(List.of(), List.of(allocation, read), List.of(read, allocation)), metrics);
         var ordinary = groups.get(Set.of());
         var contracted = groups.get(Set.of(allocation, read));
         assertSame(contracted, groups.get(Set.of(read, allocation)));
@@ -105,10 +108,22 @@ class ContainerAnalysisTest {
         var ordinaryFlow = createFlow(ordinary);
         var contractedFlow = createFlow(contracted);
         assertSame(ordinaryFlow.source(), contractedFlow.source());
+        assertSame(ordinaryFlow.source().indices(), contractedFlow.source().indices());
+        assertEquals(metrics.count(AnalysisMetrics.Count.ANALYZED_METHODS),
+                metrics.count(AnalysisMetrics.Count.INDEX_FINALIZATIONS));
+        assertTrue(metrics.count(AnalysisMetrics.Count.FLOW_CACHE_HITS) > 0);
+        assertTrue(metrics.count(AnalysisMetrics.Count.ALIAS_POSITIONS) > metrics.count(AnalysisMetrics.Count.ALIAS_VALUES));
+        long substages = metrics.nanos().entrySet().stream().filter(entry -> entry.getKey().name().startsWith("CONTAINER_"))
+                .mapToLong(Map.Entry::getValue).sum();
+        assertTrue(substages <= metrics.nanos().get(AnalysisMetrics.Stage.CONTAINER));
         assertSame(ordinaryFlow.source().instruction(0), contractedFlow.source().instruction(0));
         assertNotSame(ordinaryFlow.aliases(), contractedFlow.aliases());
         assertTrue(ordinaryFlow.allocations().isEmpty());
         assertEquals(1, contractedFlow.allocations().size());
+        int returned = contractedFlow.source().instructions().stream().filter(instruction -> instruction.getOpcode() == Opcodes.ARETURN)
+                .mapToInt(contractedFlow.source()::indexOf).findFirst().orElseThrow();
+        assertTrue(ordinaryFlow.aliases().stack(returned, 0).storages().isEmpty());
+        assertEquals(Set.copyOf(contractedFlow.allocations().values()), contractedFlow.aliases().stack(returned, 0).storages());
         assertSame(ordinary, groups.get(Set.of()));
         assertTrue(ordinaryFlow.allocations().isEmpty());
         assertThrows(UnsupportedOperationException.class, () -> contractedFlow.allocations().clear());

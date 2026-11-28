@@ -87,52 +87,72 @@ public final class ContainerAnalysis {
             List<ContainerFlow> flows = new ArrayList<>();
             List<Failure> failures = new ArrayList<>();
             Map<MethodKey, MethodContainerSummary> summaries = new LinkedHashMap<>();
-            for (ClassNode owner : classes.values().stream().sorted(java.util.Comparator.comparing(node -> node.name)).toList()) {
-                for (MethodNode method : owner.methods) {
-                    MethodKey key = new MethodKey(owner.name, method.name, method.desc);
-                    if (targets.contains(key) || containers.models(key)) continue;
-                    if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
-                        summaries.put(key, ContainerMethodAnalyzer.unavailable(key, method.access));
-                        continue;
-                    }
-                    MethodFlow source = sources.get(key);
-                    if (source == null) {
-                        long started = System.nanoTime();
-                        source = new MethodFlow(owner.name, method);
-                        metrics.add(AnalysisMetrics.Stage.DATAFLOW, System.nanoTime() - started);
-                        metrics.count(AnalysisMetrics.Count.ANALYZED_METHODS, 1);
-                        sources.put(key, source);
-                    } else {
-                        metrics.count(AnalysisMetrics.Count.FLOW_CACHE_HITS, 1);
-                    }
-                    ContainerFlow flow = new ContainerFlow(source, containers);
-                    metrics.count(AnalysisMetrics.Count.SUMMARY_CONTEXTS, 1);
-                    flows.add(flow);
-                    if (source.failure() != null) failures.add(new Failure(flow, source.failure().getMessage()));
-                }
-            }
             ContainerCallGraph graph = null;
-            if (failures.isEmpty()) {
-                graph = new ContainerCallGraph(classes, flows, hierarchy, containers);
-                graph.solve();
-                summaries.putAll(graph.summaries());
-            }
-            List<ContainerAccess> accesses = new ArrayList<>();
-            if (graph != null) {
-                for (ContainerFlow flow : flows) {
-                    for (int index = 0; index < flow.source().instructionCount(); index++) {
-                        if (flow.source().reachable(index) && flow.source().instruction(index) instanceof MethodInsnNode call
-                                && call.getOpcode() != Opcodes.INVOKESTATIC) {
-                            var receivers = flow.receiverReferences(index, call);
-                            accesses.add(new ContainerAccess(flow, index, call, containers.resolve(call, receivers), receivers));
+            long summariesStarted = System.nanoTime();
+            try {
+                try {
+                    for (ClassNode owner : classes.values().stream().sorted(java.util.Comparator.comparing(node -> node.name)).toList()) {
+                        for (MethodNode method : owner.methods) {
+                            MethodKey key = new MethodKey(owner.name, method.name, method.desc);
+                            if (targets.contains(key) || containers.models(key)) continue;
+                            if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
+                                summaries.put(key, ContainerMethodAnalyzer.unavailable(key, method.access));
+                                continue;
+                            }
+                            MethodFlow source = sources.get(key);
+                            if (source == null) {
+                                long started = System.nanoTime();
+                                try {
+                                    source = new MethodFlow(owner.name, method);
+                                } finally {
+                                    metrics.add(AnalysisMetrics.Stage.DATAFLOW, System.nanoTime() - started);
+                                }
+                                metrics.count(AnalysisMetrics.Count.ANALYZED_METHODS, 1);
+                                metrics.count(AnalysisMetrics.Count.INDEX_ENTRIES, source.indices().size());
+                                metrics.count(AnalysisMetrics.Count.INDEX_FINALIZATIONS, 1);
+                                sources.put(key, source);
+                            } else {
+                                metrics.count(AnalysisMetrics.Count.FLOW_CACHE_HITS, 1);
+                            }
+                            ContainerFlow flow = new ContainerFlow(source, containers);
+                            metrics.count(AnalysisMetrics.Count.SUMMARY_CONTEXTS, 1);
+                            flows.add(flow);
+                            if (source.failure() != null) failures.add(new Failure(flow, source.failure().getMessage()));
                         }
                     }
+                } finally {
+                    long flowElapsed = metrics.nanos().getOrDefault(AnalysisMetrics.Stage.DATAFLOW, 0L) - flowBefore;
+                    metrics.add(AnalysisMetrics.Stage.CONTAINER_SUMMARIES, System.nanoTime() - summariesStarted - flowElapsed);
                 }
+                if (failures.isEmpty()) {
+                    graph = new ContainerCallGraph(classes, flows, hierarchy, containers, metrics);
+                    graph.solve();
+                    summaries.putAll(graph.summaries());
+                }
+                long effectsStarted = System.nanoTime();
+                try {
+                    List<ContainerAccess> accesses = new ArrayList<>();
+                    if (graph != null) {
+                        for (ContainerFlow flow : flows) {
+                            for (int index = 0; index < flow.source().instructionCount(); index++) {
+                                if (flow.source().reachable(index) && flow.source().instruction(index) instanceof MethodInsnNode call
+                                        && call.getOpcode() != Opcodes.INVOKESTATIC) {
+                                    var receivers = flow.receiverReferences(index, call);
+                                    accesses.add(new ContainerAccess(flow, index, call, containers.resolve(call, receivers), receivers));
+                                }
+                            }
+                        }
+                    }
+                    ContainerEffects effects = ContainerEffects.collect(flows, summaries, graph, containers, accesses);
+                    return new ContainerAnalysis(flows, summaries, graph, failures, accesses, effects);
+                } finally {
+                    metrics.add(AnalysisMetrics.Stage.CONTAINER_EFFECTS, System.nanoTime() - effectsStarted);
+                }
+            } finally {
+                if (graph != null) graph.recordMetrics();
+                long flowElapsed = metrics.nanos().getOrDefault(AnalysisMetrics.Stage.DATAFLOW, 0L) - flowBefore;
+                metrics.add(AnalysisMetrics.Stage.CONTAINER, System.nanoTime() - containerStarted - flowElapsed);
             }
-            ContainerEffects effects = ContainerEffects.collect(flows, summaries, graph, containers, accesses);
-            long flowElapsed = metrics.nanos().getOrDefault(AnalysisMetrics.Stage.DATAFLOW, 0L) - flowBefore;
-            metrics.add(AnalysisMetrics.Stage.CONTAINER, System.nanoTime() - containerStarted - flowElapsed);
-            return new ContainerAnalysis(flows, summaries, graph, failures, accesses, effects);
         }
 
     }
