@@ -38,7 +38,7 @@ class ContainerAnalysisTest {
                 }
                 """)).forEach((name, bytes) -> nodes.put(name, ClassFiles.read(bytes)));
         var hierarchy = new ClassHierarchy(nodes, getClass().getClassLoader());
-        var analysis = ContainerAnalysis.analyzeAll(nodes, Set.of(), hierarchy, List.of(List.<ContainerContract>of()))
+        var analysis = ContainerAnalysis.analyzeAll(nodes, Set.of(), hierarchy, List.of(List.<ContainerContract>of()), new AnalysisMetrics())
                 .get(Set.of());
         assertTrue(analysis.failures().isEmpty());
         assertTrue(analysis.effects().accesses().stream().anyMatch(access ->
@@ -69,7 +69,7 @@ class ContainerAnalysisTest {
                 }
                 """)).forEach((name, bytes) -> nodes.put(name, ClassFiles.read(bytes)));
         var hierarchy = new ClassHierarchy(nodes, getClass().getClassLoader());
-        var analysis = ContainerAnalysis.analyzeAll(nodes, Set.of(), hierarchy, List.of(List.<ContainerContract>of()))
+        var analysis = ContainerAnalysis.analyzeAll(nodes, Set.of(), hierarchy, List.of(List.<ContainerContract>of()), new AnalysisMetrics())
                 .get(Set.of());
         assertTrue(analysis.failures().isEmpty());
         assertTrue(analysis.effects().accesses().stream().noneMatch(access ->
@@ -128,7 +128,7 @@ class ContainerAnalysisTest {
         assertTrue(ordinaryFlow.allocations().isEmpty());
         assertThrows(UnsupportedOperationException.class, () -> contractedFlow.allocations().clear());
 
-        var anotherBatch = ContainerAnalysis.analyzeAll(nodes, Set.of(), hierarchy, List.of(List.of(allocation, read))).get(Set.of(allocation, read));
+        var anotherBatch = ContainerAnalysis.analyzeAll(nodes, Set.of(), hierarchy, List.of(List.of(allocation, read)), new AnalysisMetrics()).get(Set.of(allocation, read));
         assertNotSame(contracted.callGraph(), anotherBatch.callGraph());
         assertNotSame(contractedFlow.source(), createFlow(anotherBatch).source());
     }
@@ -151,7 +151,7 @@ class ContainerAnalysisTest {
         var allocation = new ContainerContract("box", 1, new MethodKey("sample/Subject$Box", "<init>", "()V"),
                 new ContainerSummary(ContainerOperation.ALLOCATE, 0, -1));
 
-        var groups = ContainerAnalysis.analyzeAll(nodes, Set.of(), hierarchy, List.of(List.of(), List.of(allocation)));
+        var groups = ContainerAnalysis.analyzeAll(nodes, Set.of(), hierarchy, List.of(List.of(), List.of(allocation)), new AnalysisMetrics());
         var ordinary = groups.get(Set.of());
         var contracted = groups.get(Set.of(allocation));
         var storage = createFlow(contracted).allocations().values().iterator().next();

@@ -57,11 +57,6 @@ public final class RepresentationBatch {
     }
 
     public static RepresentationBatchResult analyze(List<RepresentationMigration> declarations, Map<String, ClassNode> classes,
-            Map<MethodKey, Migration> targets, ClassHierarchy hierarchy) {
-        return analyze(declarations, classes, targets, hierarchy, new AnalysisMetrics());
-    }
-
-    public static RepresentationBatchResult analyze(List<RepresentationMigration> declarations, Map<String, ClassNode> classes,
             Map<MethodKey, Migration> targets, ClassHierarchy hierarchy, AnalysisMetrics metrics) {
         List<BatchConflict> conflicts = new ArrayList<>();
         List<Session> sessions = declarations.stream().sorted(Comparator.comparing((RepresentationMigration value) -> value.target().toString())

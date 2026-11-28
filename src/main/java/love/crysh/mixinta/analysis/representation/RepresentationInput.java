@@ -38,10 +38,6 @@ final class RepresentationInput {
     record CallCandidate(AnalysisSite site, MethodInsnNode call) { }
     record LocalCandidate(AnalysisSite site, OriginValue value) { }
 
-    RepresentationInput(ContainerAnalysis containers) {
-        this(containers, null);
-    }
-
     RepresentationInput(ContainerAnalysis containers, Set<MethodKey> targets) {
         this.containers = containers;
         Map<AbstractInsnNode, AnalysisSite> sites = new IdentityHashMap<>();
@@ -63,7 +59,7 @@ final class RepresentationInput {
                 var instruction = flow.source().instruction(index);
                 AnalysisSite site = sites.get(instruction);
                 if (instruction instanceof MethodInsnNode call) {
-                    if (targets == null || targets.stream().anyMatch(key -> key.name().equals(call.name)
+                    if (targets.stream().anyMatch(key -> key.name().equals(call.name)
                             && key.descriptor().equals(call.desc))) calls.add(new CallCandidate(site, call));
                     if (RepresentationQueries.isUnbox(call)) unboxes.add(new CallCandidate(site, call));
                 } else if (instruction instanceof VarInsnNode variable) {

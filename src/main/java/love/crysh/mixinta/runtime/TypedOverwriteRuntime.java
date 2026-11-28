@@ -383,7 +383,7 @@ public final class TypedOverwriteRuntime {
                 METRICS.add(AnalysisMetrics.Stage.OUTPUT, System.nanoTime() - outputStarted);
             }
             RuntimeSnapshot snapshot = new RuntimeSnapshot(ORIGINALS, snapshots, transformed,
-                    plan.modifiedClasses(), plan.retiredMethods(), sourceIndex.sources());
+                    plan.modifiedClasses(), plan.retiredMethods());
             refreshExisting();
             for (String name : snapshot.modifiedClasses()) {
                 if (EXISTING.containsKey(name)) throw fail("EARLY_MODIFIED_CLASS", name);

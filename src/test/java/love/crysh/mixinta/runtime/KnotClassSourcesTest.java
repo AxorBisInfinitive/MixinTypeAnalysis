@@ -37,12 +37,15 @@ class KnotClassSourcesTest {
         try (FakeKnot loader = new FakeKnot(first, second)) {
             var sources = new KnotClassSources(loader);
             var state = sources.state();
-            var classes = sources.classes(state);
+            var classes = sources.index(state).sources();
             assertEquals(Set.of("sample/Subject"), classes.keySet());
-            assertEquals(first.resolve("sample/Subject.class").toUri().toURL(), classes.get("sample/Subject"));
+            assertEquals(first.resolve("sample/Subject.class").toUri().toURL(), classes.get("sample/Subject").resource());
+            assertEquals(ClassSourceIndex.Status.DISCOVERED, classes.get("sample/Subject").status());
             loader.delegate.allowedPrefixes.put(first, new String[] {"other."});
             assertNotEquals(state, sources.state());
-            assertTrue(sources.classes(sources.state()).isEmpty());
+            var restricted = sources.index(sources.state()).sources().get("sample/Subject");
+            assertEquals(ClassSourceIndex.Status.RESTRICTED, restricted.status());
+            assertEquals(first.resolve("sample/Subject.class").toUri().toURL(), restricted.resource());
         }
     }
 
@@ -66,9 +69,10 @@ class KnotClassSourcesTest {
         }
         try (FakeKnot loader = new FakeKnot(jar)) {
             var sources = new KnotClassSources(loader);
-            var classes = sources.classes(sources.state());
+            var classes = sources.index(sources.state()).sources();
             assertEquals(Set.of("sample/Subject"), classes.keySet());
-            assertArrayEquals(selected, KnotClassSources.read(classes.get("sample/Subject")));
+            assertEquals(ClassSourceIndex.Status.DISCOVERED, classes.get("sample/Subject").status());
+            assertArrayEquals(selected, KnotClassSources.read(classes.get("sample/Subject").resource()));
         }
     }
 

@@ -64,7 +64,7 @@ class ConstraintGraphTest {
         var validation = snapshot.mutableCopy();
         validation.link(boundary, target, DependencyKind.SOURCE_RESULT);
 
-        assertFalse(snapshot.contains(boundary));
+        assertTrue(snapshot.at(boundary.point(), 0).isEmpty());
         assertEquals(originalEvidence, snapshot.evidence(List.of(source)));
         assertTrue(validation.ancestors(List.of(source)).contains(boundary));
         assertThrows(IllegalStateException.class,

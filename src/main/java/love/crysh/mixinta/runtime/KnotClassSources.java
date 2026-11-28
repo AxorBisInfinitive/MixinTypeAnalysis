@@ -47,15 +47,6 @@ final class KnotClassSources {
         return new State(roots, Map.copyOf(prefixes), parents == null ? null : Set.copyOf(parents));
     }
 
-    Map<String, URL> classes(State state) throws IOException, ReflectiveOperationException,
-            net.fabricmc.loader.impl.util.UrlConversionException {
-        Map<String, URL> result = new LinkedHashMap<>();
-        index(state).sources().forEach((name, source) -> {
-            if (source.status() == ClassSourceIndex.Status.DISCOVERED) result.put(name, source.resource());
-        });
-        return result;
-    }
-
     ClassSourceIndex index(State state) throws IOException, ReflectiveOperationException,
             net.fabricmc.loader.impl.util.UrlConversionException {
         Set<String> names = new TreeSet<>();

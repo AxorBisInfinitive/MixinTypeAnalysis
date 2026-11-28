@@ -35,7 +35,7 @@ class ContainerMethodAnalyzerTest {
                 } else {
                     var flow = new ContainerFlow(new MethodFlow(owner.name, method), new ContainerRules(List.of()));
 
-                    summaries.put(key, new ContainerMethodAnalyzer(flow).analyze());
+                    summaries.put(key, new ContainerMethodAnalyzer(flow, new ContainerRules(List.of())).analyze());
                 }
             }
         }
@@ -178,7 +178,8 @@ class ContainerMethodAnalyzerTest {
                 }
                 """).method("create");
         assertEquals(2, summary.allocations().size());
-        assertEquals(Set.copyOf(summary.allocations()), summary.returns().getFirst().value().storages());
+        assertEquals(summary.allocations().stream().map(MethodContainerSummary.Allocation::new)
+                .collect(java.util.stream.Collectors.toSet()), summary.returns().getFirst().value().origins());
         assertEquals(2, summary.returns().getFirst().value().origins().size());
     }
 
@@ -192,7 +193,8 @@ class ContainerMethodAnalyzerTest {
                 }
                 """).method("create");
         assertEquals(1, summary.allocations().size());
-        assertEquals(Set.copyOf(summary.allocations()), summary.returns().getFirst().value().storages());
+        assertEquals(summary.allocations().stream().map(MethodContainerSummary.Allocation::new)
+                .collect(java.util.stream.Collectors.toSet()), summary.returns().getFirst().value().origins());
         assertTrue(summary.returns().getFirst().value().nullable());
     }
 
@@ -312,7 +314,7 @@ class ContainerMethodAnalyzerTest {
         var method = ClassFiles.findMethod(owner, "identity", "(Ljava/lang/Object;)Ljava/lang/Object;");
         var flow = new ContainerFlow(new MethodFlow(owner.name, method), new ContainerRules(List.of()));
 
-        var before = new ContainerMethodAnalyzer(flow).analyze();
+        var before = new ContainerMethodAnalyzer(flow, new ContainerRules(List.of())).analyze();
         method.instructions.clear();
         assertEquals(summary, before);
     }

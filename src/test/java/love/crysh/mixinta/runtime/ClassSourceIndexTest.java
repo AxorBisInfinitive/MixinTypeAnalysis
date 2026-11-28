@@ -24,10 +24,10 @@ class ClassSourceIndexTest {
         sources.put("sample/Broken", source("sample/Broken", broken));
         sources.put("sample/Missing", source("sample/Missing", missing));
         var index = new ClassSourceIndex(sources);
-        assertTrue(index.inputs().isEmpty());
+        assertEquals(0, index.inspectedCount());
         assertEquals(ClassSourceIndex.Status.PARSE_FAILED, index.inspect("sample/Broken", EnvType.SERVER).status());
         assertEquals(ClassSourceIndex.Status.READ_FAILED, index.inspect("sample/Missing", EnvType.SERVER).status());
-        var failure = assertThrows(TypedOverwriteException.class, index::verifyComplete);
+        var failure = assertThrows(TypedOverwriteException.class, () -> index.verifyIncluded(name -> true));
         assertEquals(2, failure.diagnostics().size());
         assertTrue(failure.getMessage().contains("broken.class"));
         assertTrue(failure.getMessage().contains("PARSE_FAILED"));
@@ -49,7 +49,7 @@ class ClassSourceIndexTest {
         assertEquals(file.toUri().toURL(), input.source().resource());
         assertSame(getClass().getClassLoader(), input.source().definingLoader());
         assertNull(input.bytes());
-        assertDoesNotThrow(index::verifyComplete);
+        assertDoesNotThrow(() -> index.verifyIncluded(name -> true));
     }
 
     private ClassSourceIndex.Source source(String name, Path file) throws Exception {
@@ -71,7 +71,9 @@ class ClassSourceIndexTest {
         assertEquals(1, index.unavailableCount());
         assertEquals(1, index.failedCount());
         index.releaseInputs();
-        assertTrue(index.inputs().isEmpty());
+        var inputs = ClassSourceIndex.class.getDeclaredField("inputs");
+        inputs.setAccessible(true);
+        assertTrue(((Map<?, ?>) inputs.get(index)).isEmpty());
         assertEquals(1, index.inspectedCount());
         assertEquals(1, index.failedCount());
     }

@@ -37,11 +37,6 @@ public record MethodContainerSummary(MethodKey method, int access, boolean hasBo
         public Value {
             origins = Set.copyOf(origins);
         }
-
-        Set<StorageId> storages() {
-            return origins.stream().filter(Allocation.class::isInstance).map(Allocation.class::cast)
-                    .map(Allocation::storage).collect(java.util.stream.Collectors.toSet());
-        }
     }
 
     public record Returned(ProgramPoint point, Value value) {

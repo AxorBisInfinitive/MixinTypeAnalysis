@@ -1,5 +1,6 @@
 package love.crysh.mixinta.testsupport;
 
+import love.crysh.mixinta.analysis.AnalysisMetrics;
 import love.crysh.mixinta.analysis.TypedOverwriteAnalyzer;
 import love.crysh.mixinta.analysis.container.ContainerAnalysis;
 import love.crysh.mixinta.analysis.container.ContainerContract;
@@ -82,7 +83,7 @@ public final class AnalysisWorkloadProbe {
         }
         return () -> {
             var analyses = ContainerAnalysis.analyzeAll(nodes, Set.of(),
-                    new ClassHierarchy(nodes, AnalysisWorkloadProbe.class.getClassLoader()), groups);
+                    new ClassHierarchy(nodes, AnalysisWorkloadProbe.class.getClassLoader()), groups, new AnalysisMetrics());
             if (analyses.values().stream().anyMatch(analysis -> !analysis.failures().isEmpty())) {
                 throw new IllegalStateException("Container workload failed");
             }

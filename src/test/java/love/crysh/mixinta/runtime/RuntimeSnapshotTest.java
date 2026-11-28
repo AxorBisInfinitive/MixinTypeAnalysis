@@ -19,10 +19,10 @@ class RuntimeSnapshotTest {
         original[0] = 4;
         postMixin[0] = 5;
         modified[0] = 6;
-        assertArrayEquals(new byte[] {1}, snapshot.beforeMixins().get("a"));
-        assertArrayEquals(new byte[] {2}, snapshot.afterMixins().get("b"));
-        assertArrayEquals(new byte[] {3}, snapshot.outputs().get("b"));
-        assertEquals(Set.of("b"), snapshot.outputs().keySet());
+        assertArrayEquals(new byte[] {1}, snapshot.beforeMixin("a"));
+        assertArrayEquals(new byte[] {2}, snapshot.afterMixin("b"));
+        assertArrayEquals(new byte[] {3}, snapshot.outputOf("b"));
+        assertEquals(Set.of("b"), snapshot.modifiedClasses());
         assertArrayEquals(new byte[] {1}, snapshot.outputOf("a"));
         byte[] supplied = snapshot.outputOf("b");
         supplied[0] = 7;
@@ -37,6 +37,10 @@ class RuntimeSnapshotTest {
         after.setAccessible(true);
         assertSame(before.invoke(a), after.invoke(a));
         assertNotSame(before.invoke(inputs.get("b")), after.invoke(inputs.get("b")));
-        assertThrows(UnsupportedOperationException.class, () -> snapshot.outputs().clear());
+        var outputs = RuntimeSnapshot.class.getDeclaredField("outputs");
+        outputs.setAccessible(true);
+        var changes = (Map<?, ?>) outputs.get(snapshot);
+        assertEquals(snapshot.modifiedClasses(), changes.keySet());
+        assertThrows(UnsupportedOperationException.class, changes::clear);
     }
 }

@@ -1,5 +1,6 @@
 package love.crysh.mixinta.analysis.representation;
 
+import love.crysh.mixinta.analysis.AnalysisMetrics;
 import love.crysh.mixinta.analysis.container.ContainerAnalysis;
 import love.crysh.mixinta.analysis.container.ContainerContract;
 import love.crysh.mixinta.analysis.container.ContainerOperation;
@@ -247,8 +248,8 @@ class RepresentationPlannerEvidenceTest {
         Map<MethodKey, Migration> migrations = new LinkedHashMap<>();
         declarations.forEach(value -> migrations.put(value.target(), new Migration(value.target(),
                 new MethodKey(value.target().owner(), value.target().name(), "(Lsample/BlockPos;)I"), Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, List.of(value))));
-        var containers = ContainerAnalysis.analyzeAll(classes, migrations.keySet(), hierarchy, List.of(contracts)).get(Set.copyOf(contracts));
-        var input = new RepresentationInput(containers);
+        var containers = ContainerAnalysis.analyzeAll(classes, migrations.keySet(), hierarchy, List.of(contracts), new AnalysisMetrics()).get(Set.copyOf(contracts));
+        var input = new RepresentationInput(containers, migrations.keySet());
         var propagation = declarations.stream().map(value -> new RepresentationSolver(List.of(value), migrations, hierarchy).solve(input)).toList();
         var initial = new ElementFacts();
         for (int i = 0; i < declarations.size(); i++) initial.add(List.of(declarations.get(i)), propagation.get(i).facts());

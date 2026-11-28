@@ -1,5 +1,6 @@
 package love.crysh.mixinta.analysis.representation;
 
+import love.crysh.mixinta.analysis.AnalysisMetrics;
 import love.crysh.mixinta.analysis.container.ContainerAnalysis;
 import love.crysh.mixinta.analysis.container.StorageId;
 import love.crysh.mixinta.analysis.container.StorageSlot;
@@ -85,7 +86,8 @@ class RepresentationDiagnosticsTest {
 
     private RepresentationInput input(Map<String, ClassNode> classes) {
         var hierarchy = new ClassHierarchy(classes, getClass().getClassLoader());
-        return new RepresentationInput(ContainerAnalysis.analyzeAll(classes, Set.of(), hierarchy, List.of(List.of())).get(Set.of()));
+        var containers = ContainerAnalysis.analyzeAll(classes, Set.of(), hierarchy, List.of(List.of()), new AnalysisMetrics()).get(Set.of());
+        return new RepresentationInput(containers, Set.of(TARGET));
     }
 
     private static RepresentationDiagnostics report(RepresentationInput input) {

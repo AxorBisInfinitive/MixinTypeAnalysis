@@ -66,10 +66,6 @@ public final class ContainerCallGraph {
     private List<PropagationEdge> finalDependencies;
     private long finalDispatchBuilds, finalDispatchHits, dependencyBuilds, valueResolutions, valueOrigins, recordedUnknowns;
 
-    ContainerCallGraph(Map<String, ClassNode> classes, List<ContainerFlow> methods, ClassHierarchy hierarchy, ContainerRules containers) {
-        this(classes, methods, hierarchy, containers, new AnalysisMetrics());
-    }
-
     ContainerCallGraph(Map<String, ClassNode> classes, List<ContainerFlow> methods, ClassHierarchy hierarchy,
             ContainerRules containers, AnalysisMetrics metrics) {
         this.classes = classes;

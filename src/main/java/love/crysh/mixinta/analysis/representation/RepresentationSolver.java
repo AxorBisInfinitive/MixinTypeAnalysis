@@ -40,7 +40,6 @@ import static love.crysh.mixinta.analysis.representation.RepresentationQueries.*
 
 /** 从固定 Mixin 后快照求解值与存储传播，SOURCE 规则参与来源选择。 */
 final class RepresentationSolver {
-    private record Demand(AbstractInsnNode origin, ProgramPoint parent) { }
     private final List<RepresentationMigration> migrations;
     private final RepresentationMigration migration;
     private final Map<MethodKey, Migration> targets;
@@ -53,7 +52,7 @@ final class RepresentationSolver {
     private final Map<MethodKey, MethodContainerSummary> methodSummaries = new LinkedHashMap<>();
     private ContainerCallGraph callGraph;
     private RepresentationInput input;
-    private final ArrayDeque<Demand> pending = new ArrayDeque<>();
+    private final ArrayDeque<AbstractInsnNode> pending = new ArrayDeque<>();
     private final Set<AbstractInsnNode> requested = new HashSet<>();
     private final ConstraintGraph graph = new ConstraintGraph();
     private final Set<PropagationEdge> dependencies = new LinkedHashSet<>();
@@ -135,14 +134,13 @@ final class RepresentationSolver {
             ProgramPoint point = sites.get(origin).point();
             dependencies.add(new PropagationEdge(parent.point(), point, kind));
             graph.link(parent, ConstraintGraph.value(point), kind);
-            if (requested.add(origin)) pending.add(new Demand(origin, parent.point()));
+            if (requested.add(origin)) pending.add(origin);
         }
     }
 
     private void solveDemands() {
         while (!pending.isEmpty()) {
-            Demand demand = pending.removeFirst();
-            AbstractInsnNode origin = demand.origin;
+            AbstractInsnNode origin = pending.removeFirst();
             AnalysisSite site = sites.get(origin);
             if (origin instanceof MethodInsnNode call) {
                 List<RepresentationRule> candidates = migration.rules().stream()

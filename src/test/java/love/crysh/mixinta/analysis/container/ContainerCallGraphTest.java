@@ -1,5 +1,6 @@
 package love.crysh.mixinta.analysis.container;
 
+import love.crysh.mixinta.analysis.AnalysisMetrics;
 import love.crysh.mixinta.analysis.flow.MethodFlow;
 import love.crysh.mixinta.bytecode.ClassHierarchy;
 import love.crysh.mixinta.model.MethodKey;
@@ -53,7 +54,8 @@ class ContainerCallGraphTest {
         var method = new MethodNode(Opcodes.ACC_STATIC, "run", "()V", null, null);
         method.instructions.add(new InsnNode(Opcodes.RETURN));
         var flow = new MethodFlow("sample/Subject", method);
-        var analyzer = new ContainerMethodAnalyzer(new ContainerFlow(flow, new ContainerRules(List.of())));
+        var rules = new ContainerRules(List.of());
+        var analyzer = new ContainerMethodAnalyzer(new ContainerFlow(flow, rules), rules);
         var source = new love.crysh.mixinta.analysis.flow.OriginValue(1, Set.of());
         var first = new ProgramPoint(flow.key(), 3, "call", "receiver");
         var second = new ProgramPoint(flow.key(), 3, "call", "parameter=0");
@@ -63,7 +65,8 @@ class ContainerCallGraphTest {
     }
     @Test
     void reusesUnknownsByCompleteLocationWithoutAddingSolverNodes() throws Exception {
-        var graph = new ContainerCallGraph(Map.of(), List.of(), new ClassHierarchy(Map.of(), getClass().getClassLoader()), new ContainerRules(List.of()));
+        var graph = new ContainerCallGraph(Map.of(), List.of(), new ClassHierarchy(Map.of(), getClass().getClassLoader()),
+                new ContainerRules(List.of()), new AnalysisMetrics());
         var method = new MethodKey("sample/Subject", "run", "()V");
         var first = new ProgramPoint(method, 1, "field", "first");
         var detail = new ProgramPoint(method, 1, "field", "second");
@@ -90,7 +93,8 @@ class ContainerCallGraphTest {
         owner.methods.add(method);
         var flow = new MethodFlow(owner.name, method);
         var nodes = Map.of(owner.name, owner);
-        var graph = new ContainerCallGraph(nodes, List.of(new ContainerFlow(flow, rules)), new ClassHierarchy(nodes, getClass().getClassLoader()), rules);
+        var graph = new ContainerCallGraph(nodes, List.of(new ContainerFlow(flow, rules)),
+                new ClassHierarchy(nodes, getClass().getClassLoader()), rules, new AnalysisMetrics());
         var value = producer(flow.point(0));
         assertTrue(ReferenceJoiner.empty(graph.resolve(flow.key(), value)));
         graph.solve();

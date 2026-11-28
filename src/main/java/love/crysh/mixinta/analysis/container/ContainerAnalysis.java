@@ -46,12 +46,6 @@ public final class ContainerAnalysis {
 
     public static Map<Set<ContainerContract>, ContainerAnalysis> analyzeAll(Map<String, ClassNode> classes,
             Set<MethodKey> targets, ClassHierarchy hierarchy,
-            java.util.Collection<? extends java.util.Collection<ContainerContract>> contractGroups) {
-        return analyzeAll(classes, targets, hierarchy, contractGroups, new AnalysisMetrics());
-    }
-
-    public static Map<Set<ContainerContract>, ContainerAnalysis> analyzeAll(Map<String, ClassNode> classes,
-            Set<MethodKey> targets, ClassHierarchy hierarchy,
             java.util.Collection<? extends java.util.Collection<ContainerContract>> contractGroups,
             AnalysisMetrics metrics) {
         Builder builder = new Builder(classes, targets, hierarchy.readOnlyQueries(), metrics);

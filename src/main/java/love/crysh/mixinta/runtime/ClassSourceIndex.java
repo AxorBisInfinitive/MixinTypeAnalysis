@@ -10,7 +10,6 @@ import org.objectweb.asm.tree.ClassNode;
 import java.net.URL;
 import java.nio.file.Path;
 import java.util.LinkedHashMap;
-import java.util.List;
 import java.util.Map;
 
 /** 来源可先于方法体枚举。未知输入保留失败原因，全局批次据此判断范围能否验证。 */
@@ -43,7 +42,6 @@ final class ClassSourceIndex {
     ClassSourceIndex(Map<String, Source> sources) { this.sources = Map.copyOf(sources); }
 
     Map<String, Source> sources() { return sources; }
-    List<Input> inputs() { return List.copyOf(inputs.values()); }
     void releaseInputs() { inputs.clear(); }
     long inspectionNanos() { return inspectionNanos; }
     long inspectedCount() { return inspectedCount; }
@@ -96,10 +94,6 @@ final class ClassSourceIndex {
     private void failed(String name, Status status, Throwable cause) {
         Source source = sources.get(name);
         if (source != null) remember(new Input(source, status, null, cause));
-    }
-
-    void verifyComplete() {
-        verifyIncluded(name -> true);
     }
 
     void verifyIncluded(java.util.function.Predicate<String> included) {

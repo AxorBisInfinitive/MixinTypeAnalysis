@@ -200,9 +200,9 @@ public final class InitializationProbeRuntime {
             }
             System.out.println("RAW_INPUT_VERIFIED " + name + " clientOnly=present");
             var stages = new LinkedHashMap<String, byte[]>();
-            stages.put("PRE_MIXIN", snapshotMap("beforeMixins").get(name));
-            stages.put("POST_MIXIN", snapshotMap("afterMixins").get(name));
-            stages.put("TA_OUTPUT", snapshotMap("outputs").get(name));
+            stages.put("PRE_MIXIN", snapshotBytes("beforeMixin", name));
+            stages.put("POST_MIXIN", snapshotBytes("afterMixin", name));
+            stages.put("TA_OUTPUT", snapshotBytes("outputOf", name));
             for (var stage : stages.entrySet()) {
                 ClassNode snapshot = node(stage.getValue());
                 if (snapshot.methods.stream().anyMatch(method -> method.name.equals("clientOnly"))
@@ -251,7 +251,7 @@ public final class InitializationProbeRuntime {
             subject.getDeclaredMethod("div", int.class, int.class);
             throw new AssertionError("Old descriptor present in defined target");
         } catch (NoSuchMethodException expected) { }
-        var run = node(snapshotMap("outputs").get("fixture/business/Caller")).methods.stream()
+        var run = node(snapshotBytes("outputOf", "fixture/business/Caller")).methods.stream()
                 .filter(method -> method.name.equals("run")).findFirst().orElseThrow();
         int casts = 0;
         int calls = 0;
@@ -335,7 +335,7 @@ public final class InitializationProbeRuntime {
         if (resource == null) throw new AssertionError("Missing target resource");
         byte[] bytes;
         try (var input = resource.openStream()) {
-            bytes = published ? snapshotMap("afterMixins").get(name.replace('.', '/')) : input.readAllBytes();
+            bytes = published ? snapshotBytes("afterMixin", name.replace('.', '/')) : input.readAllBytes();
         }
         var entered = new CountDownLatch(1);
         var released = new CountDownLatch(1);
@@ -434,7 +434,7 @@ public final class InitializationProbeRuntime {
     }
 
     private static void defineIndexedCaller(java.security.CodeSource source) throws Exception {
-        byte[] bytes = snapshotMap("afterMixins").get("fixture/business/Caller");
+        byte[] bytes = snapshotBytes("afterMixin", "fixture/business/Caller");
         defineClass("fixture.business.Caller", bytes, source);
     }
 
@@ -477,13 +477,13 @@ public final class InitializationProbeRuntime {
         }
     }
 
-    @SuppressWarnings("unchecked")
-    private static Map<String, byte[]> snapshotMap(String name) {
+    private static byte[] snapshotBytes(String stage, String name) {
         Object snapshot = runtimeField("result");
+        if (stage.equals("outputOf") && !((Set<?>) field(snapshot, "modifiedClasses")).contains(name)) return null;
         try {
-            var method = snapshot.getClass().getDeclaredMethod(name);
+            var method = snapshot.getClass().getDeclaredMethod(stage, String.class);
             method.setAccessible(true);
-            return (Map<String, byte[]>) method.invoke(snapshot);
+            return (byte[]) method.invoke(snapshot, name);
         } catch (ReflectiveOperationException failure) {
             throw new AssertionError(failure);
         }

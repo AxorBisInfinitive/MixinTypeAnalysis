@@ -28,10 +28,6 @@ final class ContainerMethodAnalyzer {
     private final List<MethodContainerSummary.Call> calls = new ArrayList<>();
     private final List<MethodContainerSummary.Effect> effects = new ArrayList<>();
 
-    ContainerMethodAnalyzer(ContainerFlow flow) {
-        this(flow, new ContainerRules(List.of()));
-    }
-
     ContainerMethodAnalyzer(ContainerFlow flow, ContainerRules containers) {
         this.flow = flow;
         this.containers = containers;

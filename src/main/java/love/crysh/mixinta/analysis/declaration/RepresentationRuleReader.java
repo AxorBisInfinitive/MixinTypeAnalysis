@@ -53,12 +53,6 @@ public final class RepresentationRuleReader {
 
     public static List<RepresentationMigration> read(AnnotationNode annotation, MethodKey target, MethodNode implementation,
             Map<String, ClassNode> originals, Map<String, ClassNode> mixins, ClassHierarchy hierarchy,
-            List<Diagnostic> diagnostics) {
-        return read(annotation, target, implementation, originals, mixins, hierarchy, diagnostics, null);
-    }
-
-    public static List<RepresentationMigration> read(AnnotationNode annotation, MethodKey target, MethodNode implementation,
-            Map<String, ClassNode> originals, Map<String, ClassNode> mixins, ClassHierarchy hierarchy,
             List<Diagnostic> diagnostics, Map<String, List<String>> effectiveTargets) {
         List<RepresentationMigration> result = new ArrayList<>();
         Set<Integer> claimed = new HashSet<>();

@@ -129,10 +129,6 @@ final class ConstraintGraph {
         if (edges.add(new PropagationEdge(from.point(), to.point(), kind))) work.edges++;
     }
 
-    boolean contains(Subject subject) {
-        return dependencies.containsKey(subject);
-    }
-
     Set<Subject> at(ProgramPoint point, int parameter) {
         if (locations == null) {
             locations = new LinkedHashMap<>();

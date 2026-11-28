@@ -258,8 +258,7 @@ final class DiagnosticFormatter {
             int separator = owner.lastIndexOf('.');
             owner = separator >= 0 ? owner.substring(separator + 1) : owner;
         }
-        return owner + "." + method.name() + (verbosity == DiagnosticVerbosity.VERBOSE
-                ? method.descriptor() : method.descriptor());
+        return owner + "." + method.name() + method.descriptor();
     }
 
     private static String displaySymbol(String symbol, DiagnosticVerbosity verbosity) {

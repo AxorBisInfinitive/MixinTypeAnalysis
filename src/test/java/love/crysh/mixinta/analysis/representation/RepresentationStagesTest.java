@@ -1,5 +1,6 @@
 package love.crysh.mixinta.analysis.representation;
 
+import love.crysh.mixinta.analysis.AnalysisMetrics;
 import love.crysh.mixinta.analysis.container.ContainerAnalysis;
 import love.crysh.mixinta.analysis.declaration.Migration;
 import love.crysh.mixinta.analysis.declaration.RepresentationMigration;
@@ -52,8 +53,8 @@ class RepresentationStagesTest {
         var targets = Map.of(target, new Migration(target, new MethodKey("sample/Subject", "lookup", "(Lsample/BlockPos;)I"),
                 Opcodes.ACC_PUBLIC | Opcodes.ACC_STATIC, List.of(declaration)));
         var hierarchy = new ClassHierarchy(classes, getClass().getClassLoader());
-        var containers = ContainerAnalysis.analyzeAll(classes, targets.keySet(), hierarchy, List.of(List.of())).get(Set.of());
-        var input = new RepresentationInput(containers);
+        var containers = ContainerAnalysis.analyzeAll(classes, targets.keySet(), hierarchy, List.of(List.of()), new AnalysisMetrics()).get(Set.of());
+        var input = new RepresentationInput(containers, targets.keySet());
         var propagation = new RepresentationSolver(List.of(declaration), targets, hierarchy).solve(input);
         var initial = new ElementFacts();
         initial.add(List.of(declaration), propagation.facts());
