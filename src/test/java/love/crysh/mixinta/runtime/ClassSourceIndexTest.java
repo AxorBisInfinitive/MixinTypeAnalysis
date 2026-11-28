@@ -55,4 +55,24 @@ class ClassSourceIndexTest {
     private ClassSourceIndex.Source source(String name, Path file) throws Exception {
         return new ClassSourceIndex.Source(name, file.toUri().toURL(), directory, getClass().getClassLoader(), ClassSourceIndex.Status.DISCOVERED);
     }
+
+    @Test
+    void preservesCountsAfterReleaseAndCountsEachFailedClassOnce() throws Exception {
+        byte[] bytes = BytecodeFixtures.compile(Map.of("sample.Subject", "package sample; public class Subject {}"))
+                .get("sample/Subject");
+        Path file = Files.write(directory.resolve("Subject.class"), bytes);
+        var index = new ClassSourceIndex(Map.of("sample/Subject", source("sample/Subject", file)));
+        index.inspect("sample/Subject", EnvType.SERVER);
+        assertEquals(1, index.inspectedCount());
+        assertEquals(0, index.failedCount());
+        index.failed("sample/Subject", new java.io.IOException("missing"));
+        index.parsingFailed("sample/Subject", new IllegalArgumentException("invalid"));
+        assertEquals(1, index.inspectedCount());
+        assertEquals(1, index.unavailableCount());
+        assertEquals(1, index.failedCount());
+        index.releaseInputs();
+        assertTrue(index.inputs().isEmpty());
+        assertEquals(1, index.inspectedCount());
+        assertEquals(1, index.failedCount());
+    }
 }

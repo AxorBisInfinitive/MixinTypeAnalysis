@@ -17,7 +17,14 @@ import java.util.Map;
 final class ClassSourceIndex {
     enum Status { DISCOVERED, AVAILABLE, ENVIRONMENT_EXCLUDED, RESTRICTED, MISSING, RESOURCE_NAME_MISMATCH, READ_FAILED, PARSE_FAILED, PREPROCESS_FAILED }
 
-    record Source(String name, URL resource, Path root, ClassLoader definingLoader, Status status) { }
+    record Source(String name, URL resource, Path root, ClassLoader definingLoader, Status status) {
+        boolean sameOrigin(Source other) {
+            return other != null && name.equals(other.name) && definingLoader == other.definingLoader
+                    && java.util.Objects.equals(root, other.root) && status == other.status
+                    && java.util.Objects.equals(resource == null ? null : resource.toExternalForm(),
+                            other.resource == null ? null : other.resource.toExternalForm());
+        }
+    }
     record Input(Source source, Status status, byte[] bytes, Throwable cause) {
         boolean failed() { return status == Status.MISSING || status == Status.READ_FAILED || status == Status.PARSE_FAILED || status == Status.PREPROCESS_FAILED; }
         Diagnostic diagnostic() {
@@ -29,6 +36,9 @@ final class ClassSourceIndex {
     private final Map<String, Source> sources;
     private final Map<String, Input> inputs = new LinkedHashMap<>();
     private long inspectionNanos;
+    private long inspectedCount;
+    private long unavailableCount;
+    private long failedCount;
 
     ClassSourceIndex(Map<String, Source> sources) { this.sources = Map.copyOf(sources); }
 
@@ -36,6 +46,9 @@ final class ClassSourceIndex {
     List<Input> inputs() { return List.copyOf(inputs.values()); }
     void releaseInputs() { inputs.clear(); }
     long inspectionNanos() { return inspectionNanos; }
+    long inspectedCount() { return inspectedCount; }
+    long unavailableCount() { return unavailableCount; }
+    long failedCount() { return failedCount; }
 
     Input inspect(String name, EnvType environment) {
         Input cached = inputs.get(name);
@@ -96,7 +109,14 @@ final class ClassSourceIndex {
     }
 
     private Input remember(Input input) {
-        inputs.put(input.source().name(), input);
+        Input previous = inputs.put(input.source().name(), input);
+        if (previous == null) inspectedCount++;
+        else {
+            if (previous.status() != Status.AVAILABLE) unavailableCount--;
+            if (previous.failed()) failedCount--;
+        }
+        if (input.status() != Status.AVAILABLE) unavailableCount++;
+        if (input.failed()) failedCount++;
         return input;
     }
 }

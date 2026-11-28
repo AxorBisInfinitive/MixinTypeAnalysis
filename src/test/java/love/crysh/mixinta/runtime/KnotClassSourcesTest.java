@@ -3,6 +3,8 @@ package love.crysh.mixinta.runtime;
 import love.crysh.mixinta.testsupport.BytecodeFixtures;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.io.TempDir;
+import org.junit.jupiter.params.ParameterizedTest;
+import org.junit.jupiter.params.provider.ValueSource;
 
 import java.net.URL;
 import java.net.URLClassLoader;
@@ -67,6 +69,40 @@ class KnotClassSourcesTest {
             var classes = sources.classes(sources.state());
             assertEquals(Set.of("sample/Subject"), classes.keySet());
             assertArrayEquals(selected, KnotClassSources.read(classes.get("sample/Subject")));
+        }
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void detectsResourceWinnerChangesEvenWhenRootsAndBytesAreUnchanged(boolean differentBytes) throws Exception {
+        byte[] firstBytes = BytecodeFixtures.compile(Map.of("sample.Subject", "package sample; public class Subject {}"))
+                .get("sample/Subject");
+        byte[] secondBytes = differentBytes
+                ? BytecodeFixtures.compile(Map.of("sample.Subject", "package sample; public class Subject {public int value;}"))
+                        .get("sample/Subject") : firstBytes;
+        Path first = Files.createDirectories(temporary.resolve("first/sample"));
+        Path second = Files.createDirectories(temporary.resolve("second/sample"));
+        Files.write(first.resolve("Subject.class"), firstBytes);
+        Files.write(second.resolve("Subject.class"), secondBytes);
+        try (FakeKnot loader = new FakeKnot(first.getParent(), second.getParent())) {
+            var sources = new KnotClassSources(loader);
+            var state = sources.state();
+            var original = sources.index(state).sources();
+            Object transformer = new Object();
+            var configurations = new MixinDiscovery.ConfigurationSnapshot(new Object(), List.of(), List.of(), Map.of());
+            var premises = new BatchPremises(null, transformer, state, configurations, original);
+            Files.delete(first.resolve("Subject.class"));
+            assertEquals(state, sources.state());
+            assertDoesNotThrow(() -> premises.verify(null, transformer, sources.state(), configurations,
+                    (code, detail) -> new IllegalStateException(code + " " + detail)));
+            var failure = assertThrows(IllegalStateException.class, () -> premises.verifySource("sample/Subject",
+                    sources.resolve("sample/Subject", state), (code, detail) -> new IllegalStateException(code + " " + detail)));
+            assertTrue(failure.getMessage().contains("CLASS_SOURCE_CHANGED"));
+            assertTrue(failure.getMessage().contains(first.getParent().toString()));
+            assertTrue(failure.getMessage().contains(second.getParent().toString()));
+            Files.delete(second.resolve("Subject.class"));
+            assertThrows(IllegalStateException.class, () -> premises.verifySource("sample/Subject",
+                    sources.resolve("sample/Subject", state), (code, detail) -> new IllegalStateException(code + " " + detail)));
         }
     }
 

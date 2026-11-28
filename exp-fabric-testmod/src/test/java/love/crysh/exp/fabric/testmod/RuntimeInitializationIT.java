@@ -50,6 +50,7 @@ class RuntimeInitializationIT {
                 "RESULT=25", "COUNTS=1/1/1 ANALYSES=1", "TARGET_FROM_MOD=true");
         result.ordered("ADAPTER_START", "AGENT_CONNECTED", "PLUGIN_LOAD", "DECLARATIONS_PREPARED",
                 "BATCH_READY", "PLAIN_MOD_ENTRY", "BUSINESS_EXECUTED");
+        assertTrue(Long.parseLong(result.metrics("READY", true).get("SNAPSHOT_CLASSES")) > 0);
     }
 
     @Test
@@ -61,10 +62,19 @@ class RuntimeInitializationIT {
 
     @Test
     void remainsInactiveWithoutMigrationDeclarations() throws Exception {
-        Result result = launch("inactive", "", Map.of(), List.of(), false, List.of("-Dprobe.noDeclarations=true"));
+        Result result = launch("inactive", """
+                love.crysh.mixinta.runtime.TypedOverwriteRuntime.prepare();
+                love.crysh.mixinta.runtime.TypedOverwriteRuntime.initialize();
+                love.crysh.mixinta.runtime.TypedOverwriteRuntime.prepare();
+                love.crysh.mixinta.runtime.TypedOverwriteRuntime.initialize();
+                love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.defineRawCaller();
+                """, Map.of(), List.of(), false, List.of("-Dprobe.noDeclarations=true"));
         result.success();
         result.contains("INACTIVE_RUNTIME_VERIFIED", "RESULT=2");
         result.contains("AGENT_CONNECTED");
+        var metrics = result.metrics("INACTIVE", false);
+        assertEquals("0", metrics.get("INSPECTED_CLASSES"));
+        assertEquals("0", metrics.get("SNAPSHOT_PARSES"));
     }
 
     @ParameterizedTest
@@ -76,8 +86,12 @@ class RuntimeInitializationIT {
         if (kind.startsWith("excluded") || kind.equals("removed")) {
             result.contains("RESULT=2", "INACTIVE_RUNTIME_VERIFIED");
             assertFalse(result.log().contains("ANALYSIS_BEGIN"), result.log());
+            assertEquals("0", result.metrics("INACTIVE", false).get("INSPECTED_CLASSES"));
         } else if (kind.equals("unchanged")) {
             result.contains("RESULT=6", "LOCAL_OVERWRITE_VERIFIED");
+            var metrics = result.metrics("READY", false);
+            assertEquals("1", metrics.get("INSPECTED_CLASSES"));
+            assertEquals("0", metrics.get("SNAPSHOT_PARSES"));
         } else {
             result.contains("RESULT=25", "COUNTS=1/1/1 ANALYSES=1");
         }
@@ -115,6 +129,10 @@ class RuntimeInitializationIT {
         Result result = launch("broken-input-" + scope, "", Map.of(), List.of(), false, options);
         if (scope.equals("global")) {
             result.failureBeforeBusiness("UNVERIFIABLE_ANALYSIS_INPUT", "fixture/unused/Broken", "PARSE_FAILED", "outputsPublished=false");
+            var metrics = result.metrics("FAILED", false);
+            assertEquals("1", metrics.get("FAILED_INPUTS"));
+            assertEquals("1", metrics.get("diagnostics"));
+            assertEquals("SNAPSHOTTING", metrics.get("phase"));
         } else {
             result.success();
             result.contains(scope.equals("local") ? "LOCAL_OVERWRITE_VERIFIED" : "INACTIVE_RUNTIME_VERIFIED");
@@ -127,6 +145,200 @@ class RuntimeInitializationIT {
                 List.of("-Dprobe.missingPreparedInput=true"));
         result.failureBeforeBusiness("UNVERIFIABLE_ANALYSIS_INPUT", "fixture/business/Subject",
                 "PREPROCESS_FAILED", "Preprocessed class resource is missing", "outputsPublished=false");
+        assertEquals("1", result.metrics("FAILED", false).get("FAILED_INPUTS"));
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"preparing", "analysis", "cache", "definition"})
+    void rejectsChangedResourceWinnersEvenWithIdenticalBytes(String checkpoint) throws Exception {
+        String body = checkpoint.equals("cache") ? """
+                love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.switchSource();
+                Class.forName("fixture.business.Caller", false, Main.class.getClassLoader());
+                """ : checkpoint.equals("definition") ? """
+                love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.switchSource();
+                love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.defineIndexedCaller(true);
+                """ : "";
+        Result result = launch("source-winner-" + checkpoint, body, Map.of(), List.of(), false,
+                List.of("-Dprobe.sourceMutation=" + checkpoint));
+        result.failure("CLASS_SOURCE_CHANGED", "fixture/business/Caller", "SOURCE_WINNER_SWITCHED");
+        boolean published = checkpoint.equals("cache") || checkpoint.equals("definition");
+        result.metrics("FAILED", published);
+        if (published) result.metrics("READY", true);
+        else assertFalse(result.log().contains("BUSINESS_EXECUTED"), result.log());
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void checksTheActualCodeSourceAtDefinition(boolean wrongCodeSource) throws Exception {
+        Result result = launch("definition-source-" + wrongCodeSource, """
+                love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.defineIndexedCaller(%s);
+                """.formatted(wrongCodeSource), Map.of(), List.of(), false,
+                List.of("-Dprobe.sourceMutation=unchanged"));
+        if (wrongCodeSource) {
+            result.failure("CLASS_SOURCE_CHANGED", "definitionRoot=", "outputsPublished=true");
+            result.metrics("FAILED", true);
+        } else {
+            result.success();
+            result.contains("RESULT=25");
+            result.metrics("READY", true);
+        }
+    }
+
+    @Test
+    void keepsThePublishedResultWhenTheMetricsHandlerFails() throws Exception {
+        Result result = launch("metrics-logger-failure", "", Map.of(), List.of(), false,
+                List.of("-Dprobe.failMetricsLogger=true"));
+        result.success();
+        result.contains("METRICS_LOGGER_FAILURE", "RESULT=25");
+        result.metrics("READY", true);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"MixinTA discovered classes=", "MixinTA phase=CONFIGURING", "MixinTA declarations prepared",
+            "MixinTA batch ready", "MixinTA verified Mixin input", "MixinTA verified definition input", "MixinTA waiting for batch"})
+    void keepsRuntimeResultsWhenAnOrdinaryLogHandlerThrows(String message) throws Exception {
+        List<String> options = new ArrayList<>(List.of("-Dprobe.failRuntimeLogger=" + message));
+        if (message.equals("MixinTA waiting for batch")) options.add("-Dprobe.concurrent=true");
+        Result result = launch("runtime-logger-" + message.replace(' ', '-').replace('=', '-'), "", Map.of(), List.of(), false, options);
+        result.success();
+        result.contains("RUNTIME_LOGGER_FAILURE=" + message, "RESULT=25", "COUNTS=1/1/1 ANALYSES=1");
+        assertFalse(result.log().contains(" status=FAILED "), result.log());
+        result.metrics("READY", true);
+    }
+
+    @Test
+    void returnsDefinitionBytesWhenTheVerificationLogHandlerThrows() throws Exception {
+        Result result = launch("direct-definition-logger", """
+                love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.defineIndexedCaller(false);
+                """, Map.of(), List.of(), false, List.of("-Dprobe.sourceMutation=unchanged",
+                "-Dprobe.failRuntimeLogger=MixinTA verified definition input fixture/business/Caller"));
+        result.success();
+        result.contains("RUNTIME_LOGGER_FAILURE=MixinTA verified definition input fixture/business/Caller", "RESULT=25");
+        assertFalse(result.log().contains(" status=FAILED "), result.log());
+        result.metrics("READY", true);
+    }
+
+    @ParameterizedTest
+    @org.junit.jupiter.params.provider.MethodSource("frozenEntryPoints")
+    void checksFrozenPremisesAtEveryCompletedStateEntry(String scope, String mutation, String entry) throws Exception {
+        String change = switch (mutation) {
+            case "configuration" -> "org.spongepowered.asm.mixin.Mixins.addConfiguration(\"late.mixins.json\");";
+            case "sources" -> """
+                    var root = java.nio.file.Files.createTempDirectory(java.nio.file.Path.of(System.getProperty("exp.fabric.runDir")), "late-root");
+                    net.fabricmc.loader.impl.launch.FabricLauncherBase.getLauncher().addToClassPath(root);
+                    """;
+            case "bindings" -> "love.crysh.exp.fabric.testmod.initialization.InitializationProbePlugin.mutateBindings(\"remove\");";
+            case "active-remove", "active-replace", "active-reorder", "pending" ->
+                    "love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.mutateConfigurations(\"" + mutation + "\");";
+            default -> throw new IllegalArgumentException(mutation);
+        };
+        String operation = switch (entry) {
+            case "prepare" -> "love.crysh.mixinta.runtime.TypedOverwriteRuntime.prepare();";
+            case "initialize" -> "love.crysh.mixinta.runtime.TypedOverwriteRuntime.initialize();";
+            case "cache" -> "Class.forName(\"fixture.business.Caller\", false, Main.class.getClassLoader());";
+            case "definition" -> "love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.defineRawCaller();";
+            default -> throw new IllegalArgumentException(entry);
+        };
+        List<String> options = switch (scope) {
+            case "local" -> List.of("-Dprobe.discovery=unchanged");
+            case "inactive", "global" -> List.of();
+            default -> throw new IllegalArgumentException(scope);
+        };
+        Map<String, String> helpers = scope.equals("inactive") ? Map.of("fixture.mixin.SubjectMixin", """
+                package fixture.mixin;
+                @org.spongepowered.asm.mixin.Mixin(targets="fixture.business.Subject", remap=false)
+                public class SubjectMixin { private int ordinary; }
+                """) : Map.of();
+        boolean published = scope.equals("global");
+        Result result = launch("frozen-" + scope + "-" + mutation + "-" + entry, change + """
+                try {
+                    %s
+                } catch (Throwable expected) {
+                    System.out.println("FROZEN_ENTRY_REJECTED");
+                    expected.printStackTrace(System.out);
+                }
+                love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.verifyPersistentFailure(%s);
+                System.exit(0);
+                """.formatted(operation, published), helpers, List.of(), false, options);
+        result.success();
+        result.contains("FROZEN_ENTRY_REJECTED", "FAILURE_RETAINED OUTPUTS_" + (published ? "PUBLISHED" : "ABSENT"));
+        String initial = scope.equals("inactive") ? "INACTIVE" : "READY";
+        var metrics = result.metrics("FAILED", published);
+        assertEquals(initial, metrics.get("phase"));
+        result.metrics(initial, published);
+        result.contains(mutation.equals("sources") ? "CLASS_SOURCES_CHANGED" : "MIXIN_CONFIGURATION_CHANGED");
+        if (scope.equals("inactive")) {
+            assertEquals("0", metrics.get("INSPECTED_CLASSES"));
+            assertEquals("0", metrics.get("SNAPSHOT_PARSES"));
+        }
+    }
+
+    private static java.util.stream.Stream<org.junit.jupiter.params.provider.Arguments> frozenEntryPoints() {
+        return java.util.stream.Stream.of("inactive", "local", "global").flatMap(scope ->
+                java.util.stream.Stream.of("configuration", "sources", "bindings", "active-remove", "active-replace", "active-reorder", "pending").flatMap(mutation ->
+                        java.util.stream.Stream.of("prepare", "initialize", "cache", "definition")
+                                .map(entry -> org.junit.jupiter.params.provider.Arguments.of(scope, mutation, entry))));
+    }
+
+    @ParameterizedTest
+    @ValueSource(booleans = {false, true})
+    void rejectsAnInFlightDefinitionAfterAnotherThreadRetainsFailure(boolean published) throws Exception {
+        Result result = launch("in-flight-definition-" + published, """
+                love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.verifyInFlightDefinitionRejected(%s);
+                System.exit(0);
+                """.formatted(published), Map.of(), List.of(), false,
+                published ? List.of() : List.of("-Dprobe.discovery=unchanged"));
+        result.success();
+        result.contains("IN_FLIGHT_DEFINITION_REJECTED", "DEFINITION_METRICS_SETTLED", "FAILURE_RETAINED OUTPUTS_"
+                + (published ? "PUBLISHED" : "ABSENT"));
+        result.metrics("READY", published);
+        result.metrics("FAILED", published);
+    }
+
+    @ParameterizedTest
+    @ValueSource(strings = {"http://example.invalid/", "null"})
+    void retainsUnverifiableDefinitionSources(String location) throws Exception {
+        Result result = launch("unverifiable-definition-" + (location.equals("null") ? "null" : "provider"), """
+                love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.verifyUnverifiableDefinition("%s");
+                System.exit(0);
+                """.formatted(location), Map.of(), List.of(), false, List.of("-Dprobe.sourceMutation=unchanged"));
+        result.success();
+        result.contains("UNVERIFIABLE_DEFINITION_REJECTED", "FAILURE_RETAINED OUTPUTS_PUBLISHED",
+                "DEFINITION_SOURCE_CAUSE=" + (location.equals("null") ? "NullPointerException" : "FileSystemNotFoundException"));
+        result.metrics("READY", true);
+        result.metrics("FAILED", true);
+    }
+
+    @Test
+    void retainsTheOriginalFailureWhenTheFailureHandlerThrows() throws Exception {
+        Result result = launch("failure-logger-after-publication", """
+                org.spongepowered.asm.mixin.Mixins.addConfiguration("late.mixins.json");
+                try {
+                    love.crysh.mixinta.runtime.TypedOverwriteRuntime.initialize();
+                    throw new AssertionError("Changed configuration was accepted");
+                } catch (IllegalStateException expected) {
+                    if (!expected.getCause().getMessage().contains("MIXIN_CONFIGURATION_CHANGED")) throw expected;
+                    System.out.println("ORIGINAL_FAILURE_PRESERVED");
+                }
+                love.crysh.exp.fabric.testmod.initialization.InitializationProbeRuntime.verifyPersistentFailure(true);
+                System.exit(0);
+                """, Map.of(), List.of(), false, List.of("-Dprobe.failFailureLogger=true"));
+        result.success();
+        result.contains("ORIGINAL_FAILURE_PRESERVED", "FAILURE_RETAINED OUTPUTS_PUBLISHED");
+        assertEquals(1, result.log().lines().filter(line -> line.equals("FAILURE_LOGGER_FAILURE")).count(), result.log());
+        result.metrics("READY", true);
+        result.metrics("FAILED", true);
+    }
+
+    @Test
+    void finishesFailedAnalysisMetricsWhenTheFailureHandlerThrows() throws Exception {
+        Result result = launch("failure-logger-during-analysis", "", Map.of(), List.of(), false,
+                List.of("-Dprobe.changeOriginal=true", "-Dprobe.verifyFailure=true", "-Dprobe.failFailureLogger=true"));
+        result.failureBeforeBusiness("TARGET_CHANGED_AFTER_PREPARATION", "FAILURE_RETAINED OUTPUTS_ABSENT");
+        assertEquals(1, result.log().lines().filter(line -> line.equals("FAILURE_LOGGER_FAILURE")).count(), result.log());
+        var metrics = result.metrics("FAILED", false);
+        assertEquals("ANALYZING", metrics.get("phase"));
+        assertEquals("1", metrics.get("diagnostics"));
     }
 
     @ParameterizedTest
@@ -487,6 +699,7 @@ class RuntimeInitializationIT {
         result.success();
         result.contains("COUNTS=1/1/1 ANALYSES=1");
         assertEquals(1, result.log().lines().filter(line -> line.equals("ANALYSIS_BEGIN")).count(), result.log());
+        result.metrics("READY", true);
     }
 
     @Test
@@ -686,6 +899,10 @@ class RuntimeInitializationIT {
                 List.of("-Dprobe.changeOriginal=true", "-Dprobe.verifyFailure=true"));
         result.failureBeforeBusiness("TARGET_CHANGED_AFTER_PREPARATION",
                 "FAILURE_RETAINED OUTPUTS_ABSENT");
+        var metrics = result.metrics("FAILED", false);
+        assertEquals("ANALYZING", metrics.get("phase"));
+        assertEquals("1", metrics.get("diagnostics"));
+        assertTrue(Long.parseLong(metrics.get("SNAPSHOT_CLASSES")) > 0);
     }
 
     private Result launch(String scenario, String mainBody, Map<String, String> helpers, List<String> preLaunch,
@@ -797,6 +1014,18 @@ class RuntimeInitializationIT {
             else modEntries.put(entry.getKey(), entry.getValue());
         }
         if (options.contains("-Dprobe.brokenInput=true")) modEntries.put("fixture/unused/Broken.class", new byte[] {0});
+        Path firstRoot = null;
+        Path secondRoot = null;
+        if (options.stream().anyMatch(option -> option.startsWith("-Dprobe.sourceMutation="))) {
+            firstRoot = Files.createDirectories(root.resolve("first-root"));
+            secondRoot = Files.createDirectories(root.resolve("second-root"));
+            byte[] caller = modEntries.remove("fixture/business/Caller.class");
+            for (Path sourceRoot : List.of(firstRoot, secondRoot)) {
+                Path file = sourceRoot.resolve("fixture/business/Caller.class");
+                Files.createDirectories(file.getParent());
+                Files.write(file, caller);
+            }
+        }
         Path preparationRoot = null;
         if (options.contains("-Dprobe.expandPreparation=true")) {
             preparationRoot = Files.createDirectories(root.resolve("expanded-root"));
@@ -967,6 +1196,10 @@ class RuntimeInitializationIT {
                 "-Djava.awt.headless=true", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"));
         command.addAll(options);
         if (preparationRoot != null) command.add("-Dprobe.extraRoot=" + preparationRoot);
+        if (firstRoot != null) {
+            command.add("-Dprobe.firstRoot=" + firstRoot);
+            command.add("-Dprobe.secondRoot=" + secondRoot);
+        }
         if (options.contains("-Dprobe.mutateSources=true")) {
             command.add("-Dprobe.extraRoot=" + Files.createDirectories(root.resolve("extra-source")));
         }
@@ -1029,6 +1262,20 @@ class RuntimeInitializationIT {
     }
 
     private record Result(int exitCode, String log) {
+        Map<String, String> metrics(String status, boolean published) {
+            List<String> matching = log.lines().filter(line -> line.startsWith("MixinTA metrics ")
+                    && line.contains(" status=" + status + " ")).toList();
+            assertEquals(1, matching.size(), log);
+            Map<String, String> values = new LinkedHashMap<>();
+            for (String token : matching.getFirst().split(" ")) {
+                int equals = token.indexOf('=');
+                if (equals > 0) values.put(token.substring(0, equals), token.substring(equals + 1));
+            }
+            assertEquals(Boolean.toString(published), values.get("outputsPublished"), log);
+            assertTrue(Long.parseLong(values.get("totalMs")) >= Long.parseLong(values.get("declarationMs")), log);
+            return values;
+        }
+
         void success() {
             assertEquals(0, exitCode, log);
             contains("BUSINESS_EXECUTED");

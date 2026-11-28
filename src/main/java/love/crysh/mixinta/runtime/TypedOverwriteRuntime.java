@@ -3,10 +3,8 @@ package love.crysh.mixinta.runtime;
 import love.crysh.mixinta.analysis.PreparedOverwrites;
 import love.crysh.mixinta.analysis.AnalysisMetrics;
 import love.crysh.mixinta.analysis.TypedOverwriteAnalyzer;
-import love.crysh.mixinta.analysis.declaration.MixinAnnotations;
 import love.crysh.mixinta.bytecode.ClassByteSource;
 import love.crysh.mixinta.bytecode.ClassFiles;
-import love.crysh.mixinta.bytecode.MethodReferences;
 
 import net.fabricmc.loader.impl.launch.FabricLauncherBase;
 import org.objectweb.asm.tree.ClassNode;
@@ -19,7 +17,6 @@ import java.lang.reflect.InvocationTargetException;
 import java.util.Arrays;
 import java.util.HashMap;
 import java.util.LinkedHashMap;
-import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -44,11 +41,13 @@ public final class TypedOverwriteRuntime {
     private static final Object MONITOR = new Object();
     private static final Set<String> PARTICIPANTS = ConcurrentHashMap.newKeySet();
     private static final MixinDiscovery DISCOVERY = new MixinDiscovery();
+    private static final DeclarationProtection PROTECTION = new DeclarationProtection();
     private static final Map<String, Class<?>> EXISTING = new ConcurrentHashMap<>();
     private static final Map<String, byte[]> DEFINITION_INPUTS = new ConcurrentHashMap<>();
     private static final Set<String> DEPENDENCIES = ConcurrentHashMap.newKeySet();
     private static final Set<String> VERIFIED_SHAPES = ConcurrentHashMap.newKeySet();
     private static final Set<String> SUPPORT_CLASSES = ConcurrentHashMap.newKeySet();
+    private static final Set<String> FROZEN_INPUTS = ConcurrentHashMap.newKeySet();
     private static final java.net.URL SUPPORT_SOURCE = TypedOverwriteRuntime.class.getProtectionDomain().getCodeSource().getLocation();
     private static final ThreadLocal<SnapshotRequest> REQUEST = new ThreadLocal<>();
     private static final Map<String, byte[]> ORIGINALS = new LinkedHashMap<>();
@@ -72,7 +71,13 @@ public final class TypedOverwriteRuntime {
     private static MixinEnvironment batchEnvironment;
     private static long discoveryNanos;
     private static long declarationNanos;
+    private static long snapshotNanos;
+    private static long analysisNanos;
     private static long batchStarted;
+    private static boolean completionReported;
+    private static boolean failureReported;
+    private static boolean inputMetricsRecorded;
+    private static int activeChecks;
     private static final AnalysisMetrics METRICS = new AnalysisMetrics();
 
     private TypedOverwriteRuntime() { }
@@ -82,6 +87,7 @@ public final class TypedOverwriteRuntime {
             checkFailure();
             if (phase != Phase.NEW) return;
             owner = Thread.currentThread();
+            batchStarted = System.nanoTime();
             phase = Phase.BOOTSTRAPPING;
         }
         try {
@@ -89,18 +95,22 @@ public final class TypedOverwriteRuntime {
                     TypedOverwriteRuntime::publishedClass, TypedOverwriteRuntime::beforeTransform, TypedOverwriteRuntime::fail);
             classSources = new KnotClassSources(LOADER);
             transition(Phase.BOOTSTRAPPED);
-            LOG.fine("MixinTA bootstrap connected");
+            logFine("MixinTA bootstrap connected");
         } catch (Throwable cause) {
             retain(cause);
             checkFailure();
         } finally {
+            METRICS.add(AnalysisMetrics.Stage.BOOTSTRAP, System.nanoTime() - batchStarted);
             releaseOwner();
         }
     }
 
     public static void prepare() {
         bootstrap();
-        if (phase == Phase.INACTIVE) return;
+        if (phase == Phase.INACTIVE) {
+            checkConfiguration();
+            return;
+        }
         synchronized (MONITOR) {
             checkFailure();
             if (owner == Thread.currentThread() && configuring) return;
@@ -115,7 +125,7 @@ public final class TypedOverwriteRuntime {
 
     public static void initialize() {
         bootstrap();
-        if (phase == Phase.READY) checkConfiguration();
+        if (phase == Phase.READY || phase == Phase.INACTIVE) checkConfiguration();
         if (phase != Phase.INACTIVE) advance(true);
     }
 
@@ -145,7 +155,7 @@ public final class TypedOverwriteRuntime {
                 }
                 if (phase != Phase.ANALYZING) throw fail("CONCURRENT_PREPARATION", "owner=" + owner.getName());
             }
-            LOG.fine("MixinTA waiting for batch");
+            logFine("MixinTA waiting for batch");
             synchronized (MONITOR) {
                 try {
                     while (owner != null && result == null && failure == null) MONITOR.wait();
@@ -166,14 +176,14 @@ public final class TypedOverwriteRuntime {
         String name = binaryName.replace('.', '/');
         if (phase == Phase.INACTIVE) {
             checkConfiguration();
-            return null;
+            return checkedReturn(null);
         }
         SnapshotRequest request = REQUEST.get();
         if (request != null && !request.consumed && request.name.equals(name)) {
             request.consumed = true;
             return null;
         }
-        boolean participant = PARTICIPANTS.contains(name);
+        boolean participant = protectsDefinition(name, input);
         synchronized (MONITOR) {
             if (failure != null) {
                 if (participant) checkFailure();
@@ -195,7 +205,7 @@ public final class TypedOverwriteRuntime {
             if (owner != null && !participant) return null;
         }
         if (result != null || phase == Phase.READY) checkConfiguration();
-        if (phase == Phase.READY && result == null) return null;
+        if (phase == Phase.READY && result == null) return checkedReturn(null);
         if (result == null) {
             if (!inputsAvailable()) {
                 if (participant) throw fail("INPUT_NOT_READY", name);
@@ -204,14 +214,15 @@ public final class TypedOverwriteRuntime {
             // 在外层转换检查点完成批次，避免进入目标应用过程后嵌套调度。
             advance(true);
         }
-        if (phase == Phase.INACTIVE || phase == Phase.READY && result == null) return null;
+        if (phase == Phase.INACTIVE || phase == Phase.READY && result == null) return checkedReturn(null);
         participant = PARTICIPANTS.contains(name);
         if (!participant) return null;
         checkFailure();
         RuntimeSnapshot snapshot = result;
+        checkSource(name);
         if (!Arrays.equals(snapshot.beforeMixin(name), input)) throw fail("INPUT_CHANGED", name);
-        LOG.fine("MixinTA verified Mixin input " + name);
-        return snapshot.afterMixin(name);
+        logFine("MixinTA verified Mixin input " + name);
+        return checkedReturn(snapshot.afterMixin(name));
     }
 
     private static Object prepareMixin(Object value) {
@@ -244,7 +255,7 @@ public final class TypedOverwriteRuntime {
                         byte[] bytes = readInput(name);
                         if (bytes != null) protectDeclaration(ClassFiles.read(bytes));
                     } catch (IOException | RuntimeException unavailable) {
-                        LOG.fine("MixinTA candidate hint unavailable " + name + ": " + unavailable);
+                        logFine("MixinTA candidate hint unavailable " + name + ": " + unavailable);
                     }
                 }
                 return null;
@@ -261,90 +272,142 @@ public final class TypedOverwriteRuntime {
     private static void prepareDeclarations() throws Exception {
         if (prepared != null) return;
         long started = System.nanoTime();
-        batchStarted = started;
-        discoverSources();
-        transition(Phase.CONFIGURING);
-        IMixinTransformer transformer = (IMixinTransformer) MixinEnvironment.getCurrentEnvironment().getActiveTransformer();
-        if (transformer == null) throw fail("MIXIN_NOT_READY", "active transformer is missing");
-        configuring = true;
         try {
-            int remaining;
-            do {
-                Set<?> previous = Set.copyOf(Mixins.getConfigs());
-                transformer.couldTransformClass(MixinEnvironment.getCurrentEnvironment(), TypedOverwriteRuntime.class.getName());
-                remaining = Mixins.getUnvisitedCount();
-                if (remaining > 0 && previous.equals(Set.copyOf(Mixins.getConfigs()))) {
-                    throw fail("MIXIN_CONFIGURATION_NOT_READY", "unvisited=" + remaining);
+            discoverSources();
+            transition(Phase.CONFIGURING);
+            IMixinTransformer transformer = (IMixinTransformer) MixinEnvironment.getCurrentEnvironment().getActiveTransformer();
+            if (transformer == null) throw fail("MIXIN_NOT_READY", "active transformer is missing");
+            configuring = true;
+            try {
+                int remaining;
+                do {
+                    Set<?> previous = Set.copyOf(Mixins.getConfigs());
+                    transformer.couldTransformClass(MixinEnvironment.getCurrentEnvironment(), TypedOverwriteRuntime.class.getName());
+                    remaining = Mixins.getUnvisitedCount();
+                    if (remaining > 0 && previous.equals(Set.copyOf(Mixins.getConfigs()))) {
+                        throw fail("MIXIN_CONFIGURATION_NOT_READY", "unvisited=" + remaining);
+                    }
+                } while (remaining > 0);
+            } finally {
+                configuring = false;
+            }
+            checkFailure();
+            discoverSources();
+            batchEnvironment = MixinEnvironment.getCurrentEnvironment();
+            batchTransformer = transformer;
+            var configurations = DISCOVERY.configurationSnapshot(transformer);
+            if (!configurations.pending().isEmpty()) throw fail("MIXIN_CONFIGURATION_NOT_READY", "processor has pending configurations");
+            var bindings = DISCOVERY.bind(configurations);
+            premises = new BatchPremises(batchEnvironment, batchTransformer, sourceState, configurations, sourceIndex.sources());
+            PARTICIPANTS.clear();
+            PROTECTION.clear();
+            if (bindings.mixins().isEmpty()) {
+                DISCOVERY.releaseCandidates();
+                RAW_CLASSES.clear();
+                sourceIndex.releaseInputs();
+                transition(Phase.INACTIVE);
+                return;
+            }
+            for (byte[] mixin : bindings.mixins().values()) protectDeclaration(ClassFiles.read(mixin));
+            transition(Phase.PREPARING);
+            for (List<String> targets : bindings.targets().values()) {
+                for (String name : targets) {
+                    ClassSourceIndex.Input targetInput = sourceIndex.inspect(name, net.fabricmc.loader.api.FabricLoader.getInstance().getEnvironmentType());
+                    if (targetInput != null && targetInput.failed()) {
+                        throw new love.crysh.mixinta.diagnostic.TypedOverwriteException(List.of(targetInput.diagnostic()));
+                    }
+                    if (targetInput == null || targetInput.status() != ClassSourceIndex.Status.AVAILABLE) {
+                        throw fail("TARGET_OUTSIDE_KNOT_SOURCES", name + " status=" + (targetInput == null ? "MISSING" : targetInput.status()));
+                    }
+                    try {
+                        logFine("MixinTA target input ready " + name);
+                        ORIGINALS.put(name, readIndexedInput(name));
+                    } catch (IOException | RuntimeException unavailable) {
+                        sourceIndex.failed(name, unavailable);
+                        throw new love.crysh.mixinta.diagnostic.TypedOverwriteException(List.of(sourceIndex.inspect(name,
+                                net.fabricmc.loader.api.FabricLoader.getInstance().getEnvironmentType()).diagnostic()));
+                    }
+                    PARTICIPANTS.add(name);
                 }
-            } while (remaining > 0);
+            }
+            for (String name : TypedOverwriteAnalyzer.requiredRuleClasses(bindings.mixins())) {
+                if (!bindings.mixins().containsKey(name)) {
+                    byte[] bytes = readInput(name);
+                    if (bytes != null && MixinDiscovery.isMixin(ClassFiles.read(bytes))) {
+                        throw fail("RULE_MIXIN_NOT_ACTIVE", name);
+                    }
+                    if (bytes != null) ORIGINALS.putIfAbsent(name, bytes);
+                }
+            }
+            prepared = new TypedOverwriteAnalyzer((ClassByteSource) TypedOverwriteRuntime::readDependency)
+                    .prepareRuntime(ORIGINALS, bindings.mixins(), bindings.targets());
+            DISCOVERY.seal(prepared.mixins(), bindings);
+            representationBatch = prepared.hasRepresentationMigrations();
+            logFine("MixinTA declarations prepared");
+            if (!prepared.hasMigrations()) {
+                checkConfiguration();
+                checkSources();
+                DISCOVERY.releaseCandidates();
+                RAW_CLASSES.clear();
+                ORIGINALS.clear();
+                sourceIndex.releaseInputs();
+                prepared = null;
+                transition(Phase.READY);
+            }
         } finally {
-            configuring = false;
-        }
-        checkFailure();
-        discoverSources();
-        batchEnvironment = MixinEnvironment.getCurrentEnvironment();
-        batchTransformer = transformer;
-        var bindings = DISCOVERY.bind();
-        premises = new BatchPremises(batchEnvironment, batchTransformer, sourceState, DISCOVERY.configurationBindings());
-        PARTICIPANTS.clear();
-        if (bindings.mixins().isEmpty()) {
-            DISCOVERY.releaseCandidates();
-            RAW_CLASSES.clear();
-            sourceIndex.releaseInputs();
-            transition(Phase.INACTIVE);
-            return;
-        }
-        for (byte[] mixin : bindings.mixins().values()) protectDeclaration(ClassFiles.read(mixin));
-        transition(Phase.PREPARING);
-        for (List<String> targets : bindings.targets().values()) {
-            for (String name : targets) {
-                ClassSourceIndex.Input targetInput = sourceIndex.inspect(name, net.fabricmc.loader.api.FabricLoader.getInstance().getEnvironmentType());
-                if (targetInput != null && targetInput.failed()) {
-                    throw new love.crysh.mixinta.diagnostic.TypedOverwriteException(List.of(targetInput.diagnostic()));
-                }
-                if (targetInput == null || targetInput.status() != ClassSourceIndex.Status.AVAILABLE) {
-                    throw fail("TARGET_OUTSIDE_KNOT_SOURCES", name + " status=" + (targetInput == null ? "MISSING" : targetInput.status()));
-                }
-                try {
-                    ORIGINALS.put(name, readIndexedInput(name));
-                } catch (IOException | RuntimeException unavailable) {
-                    sourceIndex.failed(name, unavailable);
-                    throw new love.crysh.mixinta.diagnostic.TypedOverwriteException(List.of(sourceIndex.inspect(name,
-                            net.fabricmc.loader.api.FabricLoader.getInstance().getEnvironmentType()).diagnostic()));
-                }
-                PARTICIPANTS.add(name);
-            }
-        }
-        for (String name : TypedOverwriteAnalyzer.requiredRuleClasses(bindings.mixins())) {
-            if (!bindings.mixins().containsKey(name)) {
-                byte[] bytes = readInput(name);
-                if (bytes != null && MixinDiscovery.isMixin(ClassFiles.read(bytes))) {
-                    throw fail("RULE_MIXIN_NOT_ACTIVE", name);
-                }
-                if (bytes != null) ORIGINALS.putIfAbsent(name, bytes);
-            }
-        }
-        prepared = new TypedOverwriteAnalyzer((ClassByteSource) TypedOverwriteRuntime::readDependency)
-                .prepareRuntime(ORIGINALS, bindings.mixins(), bindings.targets());
-        DISCOVERY.seal(prepared.mixins(), bindings);
-        representationBatch = prepared.hasRepresentationMigrations();
-        declarationNanos = System.nanoTime() - started;
-        LOG.fine("MixinTA declarations prepared");
-        if (!prepared.hasMigrations()) {
-            DISCOVERY.releaseCandidates();
-            RAW_CLASSES.clear();
-            ORIGINALS.clear();
-            sourceIndex.releaseInputs();
-            prepared = null;
-            transition(Phase.READY);
+            declarationNanos += System.nanoTime() - started;
         }
     }
 
     private static void analyze() throws Exception {
         checkFailure();
-        long started = System.nanoTime();
         IMixinTransformer transformer = (IMixinTransformer) batchTransformer;
         transition(Phase.SNAPSHOTTING);
+        Map<String, byte[]> snapshots = new LinkedHashMap<>();
+        long started = System.nanoTime();
+        try {
+            captureSnapshots(transformer, snapshots);
+        } finally {
+            snapshotNanos += System.nanoTime() - started;
+            METRICS.set(AnalysisMetrics.Count.SNAPSHOT_CLASSES, snapshots.size());
+        }
+        transition(Phase.ANALYZING);
+        started = System.nanoTime();
+        try {
+            var plan = prepared.analyze(snapshots, METRICS);
+            long outputStarted = System.nanoTime();
+            Map<String, byte[]> transformed;
+            try {
+                transformed = plan.applyChanges();
+            } finally {
+                METRICS.add(AnalysisMetrics.Stage.OUTPUT, System.nanoTime() - outputStarted);
+            }
+            RuntimeSnapshot snapshot = new RuntimeSnapshot(ORIGINALS, snapshots, transformed,
+                    plan.modifiedClasses(), plan.retiredMethods(), sourceIndex.sources());
+            refreshExisting();
+            for (String name : snapshot.modifiedClasses()) {
+                if (EXISTING.containsKey(name)) throw fail("EARLY_MODIFIED_CLASS", name);
+            }
+            for (var entry : EXISTING.entrySet()) {
+                byte[] bytes = snapshots.get(entry.getKey());
+                if (bytes != null && !VERIFIED_SHAPES.contains(entry.getKey())) {
+                    throw fail("UNVERIFIED_EARLY_CLASS", entry.getKey());
+                }
+            }
+            METRICS.set(AnalysisMetrics.Count.MODIFIED_CLASSES, snapshot.modifiedClasses().size());
+            long publishStarted = System.nanoTime();
+            try {
+                publish(snapshot);
+            } finally {
+                METRICS.add(AnalysisMetrics.Stage.PUBLISH, System.nanoTime() - publishStarted);
+            }
+        } finally {
+            analysisNanos += System.nanoTime() - started;
+        }
+        logFine("MixinTA batch ready");
+    }
+
+    private static void captureSnapshots(IMixinTransformer transformer, Map<String, byte[]> snapshots) throws Exception {
         inspectSources();
         refreshExisting();
         sourceIndex.verifyIncluded(TypedOverwriteRuntime::analysisCandidate);
@@ -352,6 +415,7 @@ public final class TypedOverwriteRuntime {
             if (!analysisCandidate(entry.getKey())) continue;
             ClassNode node;
             try {
+                METRICS.count(AnalysisMetrics.Count.SNAPSHOT_PARSES, 1);
                 node = ClassFiles.read(entry.getValue());
             } catch (RuntimeException malformed) {
                 sourceIndex.parsingFailed(entry.getKey(), malformed);
@@ -365,7 +429,6 @@ public final class TypedOverwriteRuntime {
             }
         }
         sourceIndex.verifyIncluded(TypedOverwriteRuntime::analysisCandidate);
-        Map<String, byte[]> snapshots = new LinkedHashMap<>();
         refreshExisting();
         for (var entry : ORIGINALS.entrySet()) {
             SnapshotRequest previous = REQUEST.get();
@@ -385,9 +448,12 @@ public final class TypedOverwriteRuntime {
                 } else {
                     long mixinStarted = System.nanoTime();
                     long inputBefore = METRICS.nanos().getOrDefault(AnalysisMetrics.Stage.PREPROCESS, 0L);
-                    snapshots.put(entry.getKey(), transformer.transformClassBytes(name, name, entry.getValue().clone()));
-                    METRICS.add(AnalysisMetrics.Stage.MIXIN, System.nanoTime() - mixinStarted
-                            - (METRICS.nanos().getOrDefault(AnalysisMetrics.Stage.PREPROCESS, 0L) - inputBefore));
+                    try {
+                        snapshots.put(entry.getKey(), transformer.transformClassBytes(name, name, entry.getValue().clone()));
+                    } finally {
+                        METRICS.add(AnalysisMetrics.Stage.MIXIN, System.nanoTime() - mixinStarted
+                                - (METRICS.nanos().getOrDefault(AnalysisMetrics.Stage.PREPROCESS, 0L) - inputBefore));
+                    }
                 }
             } finally {
                 if (previous == null) REQUEST.remove();
@@ -418,54 +484,28 @@ public final class TypedOverwriteRuntime {
             }
         }
         PARTICIPANTS.addAll(ORIGINALS.keySet());
-        long snapshotNanos = System.nanoTime() - started;
-        started = System.nanoTime();
-        transition(Phase.ANALYZING);
-        var plan = prepared.analyze(snapshots, METRICS);
-        long outputStarted = System.nanoTime();
-        Map<String, byte[]> transformed = plan.applyChanges();
-        METRICS.add(AnalysisMetrics.Stage.OUTPUT, System.nanoTime() - outputStarted);
-        RuntimeSnapshot snapshot = new RuntimeSnapshot(ORIGINALS, snapshots, transformed,
-                plan.modifiedClasses(), plan.retiredMethods(), sourceIndex.sources());
-        refreshExisting();
-        for (String name : snapshot.modifiedClasses()) {
-            if (EXISTING.containsKey(name)) throw fail("EARLY_MODIFIED_CLASS", name);
-        }
-        for (var entry : EXISTING.entrySet()) {
-            byte[] bytes = snapshots.get(entry.getKey());
-            if (bytes != null && !VERIFIED_SHAPES.contains(entry.getKey())) {
-                throw fail("UNVERIFIED_EARLY_CLASS", entry.getKey());
-            }
-        }
-        METRICS.add(AnalysisMetrics.Stage.RAW_INPUT, sourceIndex.inspectionNanos());
-        METRICS.count(AnalysisMetrics.Count.CANDIDATE_CLASSES, sourceIndex.sources().size());
-        METRICS.count(AnalysisMetrics.Count.UNAVAILABLE_CLASSES, sourceIndex.inputs().stream()
-                .filter(input -> input.status() != ClassSourceIndex.Status.AVAILABLE).count());
-        METRICS.count(AnalysisMetrics.Count.FAILED_INPUTS, sourceIndex.inputs().stream().filter(ClassSourceIndex.Input::failed).count());
-        METRICS.count(AnalysisMetrics.Count.SNAPSHOT_CLASSES, snapshots.size());
-        METRICS.count(AnalysisMetrics.Count.MODIFIED_CLASSES, snapshot.modifiedClasses().size());
-        publish(snapshot);
-        LOG.fine("MixinTA metrics classes=" + snapshots.size() + " modified=" + snapshot.modifiedClasses().size()
-                + " discoveryMs=" + discoveryNanos / 1_000_000 + " declarationMs=" + declarationNanos / 1_000_000
-                + " snapshotMs=" + snapshotNanos / 1_000_000 + " analysisMs=" + (System.nanoTime() - started) / 1_000_000
-                + " totalMs=" + (System.nanoTime() - batchStarted) / 1_000_000 + METRICS.format());
-        LOG.fine("MixinTA batch ready");
     }
 
     private static void discoverSources() throws Exception {
         KnotClassSources.State current = classSources.state();
         long started = System.nanoTime();
-        RAW_CLASSES.clear();
-        if (sourceIndex != null) METRICS.add(AnalysisMetrics.Stage.RAW_INPUT, sourceIndex.inspectionNanos());
-        sourceIndex = classSources.index(current);
-        sourceState = current;
-        discoveryNanos += System.nanoTime() - started;
-        METRICS.add(AnalysisMetrics.Stage.SOURCE, System.nanoTime() - started);
-        LOG.fine("MixinTA discovered classes=" + sourceIndex.sources().size());
+        try {
+            RAW_CLASSES.clear();
+            ClassSourceIndex next = classSources.index(current);
+            if (sourceIndex != null) METRICS.add(AnalysisMetrics.Stage.RAW_INPUT, sourceIndex.inspectionNanos());
+            sourceIndex = next;
+            sourceState = current;
+        } finally {
+            long elapsed = System.nanoTime() - started;
+            discoveryNanos += elapsed;
+            METRICS.add(AnalysisMetrics.Stage.SOURCE, elapsed);
+        }
+        logFine("MixinTA discovered classes=" + sourceIndex.sources().size());
     }
 
     private static void inspectSources() {
         for (String name : sourceIndex.sources().keySet().stream().sorted().toList()) {
+            checkSource(name, true);
             var input = sourceIndex.inspect(name, net.fabricmc.loader.api.FabricLoader.getInstance().getEnvironmentType());
             if (input.status() == ClassSourceIndex.Status.AVAILABLE) RAW_CLASSES.put(name, input.bytes());
         }
@@ -480,31 +520,16 @@ public final class TypedOverwriteRuntime {
     }
 
     private static void protectDeclaration(ClassNode node) {
-        if (!MixinDiscovery.hasDeclarations(node)) return;
-        if (sourceIndex != null) inspectSources();
-        Set<String> targets = new LinkedHashSet<>(MixinDiscovery.targets(node));
-        Set<String> methods = new LinkedHashSet<>();
-        for (var method : node.methods) {
-            var annotation = ClassFiles.annotation(method.visibleAnnotations, MixinAnnotations.TYPED_OVERWRITE);
-            if (annotation == null) continue;
-            methods.add(method.name);
-            String selector = (String) ClassFiles.value(annotation, "method", "");
-            int descriptor = selector.indexOf('(');
-            if (descriptor > 0) methods.add(selector.substring(0, descriptor));
+        PROTECTION.register(node);
+    }
+
+    private static boolean protectsDefinition(String name, byte[] bytes) {
+        if (PARTICIPANTS.contains(name)) return true;
+        if (PROTECTION.protects(name, bytes)) {
+            PARTICIPANTS.add(name);
+            return true;
         }
-        PARTICIPANTS.addAll(targets);
-        for (var entry : RAW_CLASSES.entrySet()) {
-            try {
-                ClassNode candidate = ClassFiles.read(entry.getValue());
-                for (var method : candidate.methods) {
-                    MethodReferences.visit(method, (instruction, reference) -> {
-                        if (targets.contains(reference.owner()) && methods.contains(reference.name())) PARTICIPANTS.add(entry.getKey());
-                    });
-                }
-            } catch (RuntimeException failure) {
-                sourceIndex.parsingFailed(entry.getKey(), failure);
-            }
-        }
+        return false;
     }
 
     private static void refreshExisting() throws ReflectiveOperationException {
@@ -517,6 +542,7 @@ public final class TypedOverwriteRuntime {
         long checkedVersion = -1;
         while (true) {
             checkConfiguration();
+            checkSources();
             Map<String, byte[]> observed;
             synchronized (MONITOR) {
                 checkFailure();
@@ -528,6 +554,7 @@ public final class TypedOverwriteRuntime {
                     ORIGINALS.clear();
                     RAW_CLASSES.clear();
                     DISCOVERY.releaseCandidates();
+                    PROTECTION.clear();
                     sourceIndex.releaseInputs();
                     prepared = null;
                     return;
@@ -546,28 +573,34 @@ public final class TypedOverwriteRuntime {
     private static byte[] publishedClass(ClassLoader loader, Object[] arguments) {
         if (loader != LOADER || arguments[0] == null) return null;
         String name = (String) arguments[0];
-        if (phase == Phase.INACTIVE) return null;
+        if (phase == Phase.INACTIVE) {
+            checkConfiguration();
+            return checkedReturn(null);
+        }
         byte[] bytes = (byte[]) arguments[1];
         if (bytes == null) {
             if (arguments.length > 2 && arguments[2] instanceof Class<?> type && !type.isArray()) {
                 EXISTING.put(name, type);
                 recordSupport(name, type.getProtectionDomain());
             }
-            return null;
+            return checkedReturn(null);
         }
         if (arguments.length > 2 && arguments[2] instanceof java.security.ProtectionDomain domain) recordSupport(name, domain);
         checkFailure();
         if (phase == Phase.READY && result == null) {
             checkConfiguration();
-            return null;
+            checkDefinition(name, loader,
+                    arguments.length > 2 && arguments[2] instanceof java.security.ProtectionDomain domain ? domain : null);
+            return checkedReturn(null);
         }
         RuntimeSnapshot snapshot;
         synchronized (MONITOR) {
+            checkFailure();
             snapshot = result;
             if (snapshot == null) {
                 DEFINITION_INPUTS.put(name, bytes.clone());
                 definitionVersion++;
-                if (PARTICIPANTS.contains(name)) {
+                if (protectsDefinition(name, bytes)) {
                     ClassNode candidate = ClassFiles.read(bytes);
                     boolean readOnlyShape = (candidate.access & org.objectweb.asm.Opcodes.ACC_INTERFACE) != 0
                             && candidate.methods.stream().allMatch(method -> method.instructions.size() == 0);
@@ -577,19 +610,35 @@ public final class TypedOverwriteRuntime {
             }
         }
         checkConfiguration();
+        checkDefinition(name, loader,
+                arguments.length > 2 && arguments[2] instanceof java.security.ProtectionDomain domain ? domain : null);
         if (!PARTICIPANTS.contains(name)) {
             checkBoundary(snapshot, name, bytes);
-            return null;
+            return checkedReturn(null);
         }
         checkFailure();
         if (!Arrays.equals(snapshot.afterMixin(name), bytes)) throw fail("POST_MIXIN_INPUT_CHANGED", name);
-        LOG.fine("MixinTA verified definition input " + name);
-        return snapshot.outputOf(name);
+        logFine("MixinTA verified definition input " + name);
+        return checkedReturn(snapshot.outputOf(name));
     }
 
     private static void recordSupport(String name, java.security.ProtectionDomain domain) {
         if (domain != null && domain.getCodeSource() != null
                 && SUPPORT_SOURCE.equals(domain.getCodeSource().getLocation())) SUPPORT_CLASSES.add(name);
+    }
+
+    private static void checkDefinition(String name, ClassLoader loader, java.security.ProtectionDomain domain) {
+        if (!FROZEN_INPUTS.contains(name)) return;
+        beginCheck();
+        long started = System.nanoTime();
+        try {
+            verifySource(name, false);
+            premises.verifyDefinition(name, loader, domain, TypedOverwriteRuntime::fail);
+            checkedReturn(null);
+        } finally {
+            METRICS.add(AnalysisMetrics.Stage.PREMISES, System.nanoTime() - started);
+            endCheck();
+        }
     }
 
     private static void checkBoundary(RuntimeSnapshot snapshot, String name, byte[] bytes) {
@@ -601,9 +650,62 @@ public final class TypedOverwriteRuntime {
     }
 
     private static byte[] readInput(String name) throws IOException {
+        beginCheck();
         long started = System.nanoTime();
-        try { return FabricLauncherBase.getLauncher().getClassByteArray(name.replace('/', '.'), true); }
-        finally { METRICS.add(AnalysisMetrics.Stage.PREPROCESS, System.nanoTime() - started); }
+        try {
+            boolean frozen = premises != null && premises.inputSources().containsKey(name);
+            if (frozen) {
+                FROZEN_INPUTS.add(name);
+                checkSource(name, true);
+            }
+            byte[] bytes = FabricLauncherBase.getLauncher().getClassByteArray(name.replace('/', '.'), true);
+            if (frozen && bytes != null) checkSource(name);
+            return bytes;
+        }
+        finally {
+            METRICS.add(AnalysisMetrics.Stage.PREPROCESS, System.nanoTime() - started);
+            endCheck();
+        }
+    }
+
+    private static ClassSourceIndex.Source currentSource(String name) {
+        try {
+            return classSources.resolve(name, sourceState);
+        } catch (ReflectiveOperationException | net.fabricmc.loader.impl.util.UrlConversionException | RuntimeException unavailable) {
+            throw fail(new IllegalStateException("CLASS_SOURCE_CHANGED " + name + " source resolution failed", unavailable));
+        }
+    }
+
+    private static void checkSource(String name, boolean allowMissing) {
+        if (premises == null || !premises.inputSources().containsKey(name)) return;
+        beginCheck();
+        long started = System.nanoTime();
+        try {
+            verifySource(name, allowMissing);
+            checkedReturn(null);
+        } finally {
+            METRICS.add(AnalysisMetrics.Stage.PREMISES, System.nanoTime() - started);
+            endCheck();
+        }
+    }
+
+    private static void verifySource(String name, boolean allowMissing) {
+        METRICS.count(AnalysisMetrics.Count.SOURCE_CHECKS, 1);
+        ClassSourceIndex.Source current = currentSource(name);
+        if (allowMissing && current != null && current.status() == ClassSourceIndex.Status.MISSING) return;
+        premises.verifySource(name, current, TypedOverwriteRuntime::fail);
+    }
+
+    private static void checkSource(String name) {
+        checkSource(name, false);
+    }
+
+    private static void checkSources() {
+        for (String name : FROZEN_INPUTS.stream().sorted().toList()) {
+            Class<?> defined = EXISTING.get(name);
+            if (defined == null) checkSource(name);
+            else checkDefinition(name, defined.getClassLoader(), defined.getProtectionDomain());
+        }
     }
 
     private static byte[] readIndexedInput(String name) throws IOException {
@@ -613,9 +715,16 @@ public final class TypedOverwriteRuntime {
     }
 
     private static void checkConfiguration() {
+        beginCheck();
         long started = System.nanoTime();
-        try { verifyConfiguration(); }
-        finally { METRICS.add(AnalysisMetrics.Stage.PREMISES, System.nanoTime() - started); }
+        try {
+            verifyConfiguration();
+            checkedReturn(null);
+        }
+        finally {
+            METRICS.add(AnalysisMetrics.Stage.PREMISES, System.nanoTime() - started);
+            endCheck();
+        }
     }
 
     private static void verifyConfiguration() {
@@ -625,17 +734,22 @@ public final class TypedOverwriteRuntime {
             throw fail("MIXIN_CONFIGURATION_CHANGED", "batch environment or registered configurations changed");
         }
         if (batchEnvironment != null) {
+            KnotClassSources.State currentSources;
+            MixinDiscovery.ConfigurationSnapshot currentConfigurations;
             try {
-                premises.verify(MixinEnvironment.getCurrentEnvironment(), MixinEnvironment.getCurrentEnvironment().getActiveTransformer(),
-                        classSources.state(), DISCOVERY.configurationBindings(), TypedOverwriteRuntime::fail);
-            } catch (ReflectiveOperationException | java.util.ConcurrentModificationException cause) {
+                currentSources = classSources.state();
+                currentConfigurations = DISCOVERY.configurationSnapshot(batchTransformer);
+            } catch (ReflectiveOperationException | RuntimeException cause) {
                 retain(cause);
                 throw failureException();
             }
+            premises.verify(MixinEnvironment.getCurrentEnvironment(), MixinEnvironment.getCurrentEnvironment().getActiveTransformer(),
+                    currentSources, currentConfigurations, TypedOverwriteRuntime::fail);
         }
     }
 
     private static byte[] readDependency(String name) throws IOException {
+        if (FROZEN_INPUTS.contains(name)) checkSource(name);
         RuntimeSnapshot published = result;
         byte[] bytes = published == null ? analysisInputs.get(name) : published.outputOf(name);
         if (bytes != null) return bytes.clone();
@@ -677,7 +791,7 @@ public final class TypedOverwriteRuntime {
             checkFailure();
             phase = next;
         }
-        LOG.fine("MixinTA phase=" + next);
+        logFine("MixinTA phase=" + next);
     }
 
     private static void releaseOwner() {
@@ -686,10 +800,15 @@ public final class TypedOverwriteRuntime {
             if (failure == null && result == null && phase != Phase.INACTIVE && phase != Phase.READY) phase = Phase.BOOTSTRAPPED;
             MONITOR.notifyAll();
         }
+        reportMetrics();
     }
 
     private static IllegalStateException fail(String code, String detail) {
-        retain(new IllegalStateException(code + " " + detail + " phase=" + phase));
+        return fail(new IllegalStateException(code + " " + detail + " phase=" + phase));
+    }
+
+    private static IllegalStateException fail(IllegalStateException cause) {
+        retain(cause);
         return failureException();
     }
 
@@ -702,7 +821,69 @@ public final class TypedOverwriteRuntime {
             phase = Phase.FAILED;
             MONITOR.notifyAll();
         }
-        if (first) LOG.fine("MixinTA failure retained");
+        if (first) logFine("MixinTA failure retained");
+        reportMetrics();
+    }
+
+    private static void beginCheck() {
+        synchronized (MONITOR) {
+            activeChecks++;
+        }
+    }
+
+    private static void endCheck() {
+        boolean settled;
+        synchronized (MONITOR) {
+            settled = --activeChecks == 0;
+        }
+        if (settled) reportMetrics();
+    }
+
+    private static void reportMetrics() {
+        String message;
+        synchronized (MONITOR) {
+            // 检查可嵌套且可跨线程执行，最后一个 finally 结算后才能拍摄终态快照。
+            if (owner != null || activeChecks != 0) return;
+            Failure stopped = failure;
+            if (stopped != null) {
+                if (failureReported) return;
+                failureReported = true;
+            } else {
+                if (phase != Phase.READY && phase != Phase.INACTIVE || completionReported) return;
+                completionReported = true;
+            }
+            if (sourceIndex != null) {
+                if (!inputMetricsRecorded) {
+                    METRICS.add(AnalysisMetrics.Stage.RAW_INPUT, sourceIndex.inspectionNanos());
+                    inputMetricsRecorded = true;
+                }
+                METRICS.set(AnalysisMetrics.Count.CANDIDATE_CLASSES, sourceIndex.sources().size());
+                METRICS.set(AnalysisMetrics.Count.INSPECTED_CLASSES, sourceIndex.inspectedCount());
+                METRICS.set(AnalysisMetrics.Count.UNAVAILABLE_CLASSES, sourceIndex.unavailableCount());
+                METRICS.set(AnalysisMetrics.Count.FAILED_INPUTS, sourceIndex.failedCount());
+            }
+            METRICS.set(AnalysisMetrics.Count.PROTECTION_CHECKS, PROTECTION.inspections());
+            long diagnostics = stopped != null && stopped.cause() instanceof love.crysh.mixinta.diagnostic.TypedOverwriteException typed
+                    ? typed.diagnostics().size() : 0;
+            message = "MixinTA metrics classes=" + METRICS.count(AnalysisMetrics.Count.SNAPSHOT_CLASSES)
+                    + " modified=" + METRICS.count(AnalysisMetrics.Count.MODIFIED_CLASSES)
+                    + " status=" + phase + " phase=" + (stopped == null ? phase : stopped.phase())
+                    + " outputsPublished=" + (stopped == null ? result != null : stopped.published())
+                    + " failureType=" + (stopped == null ? "none" : stopped.cause().getClass().getName())
+                    + " diagnostics=" + diagnostics
+                    + " discoveryMs=" + discoveryNanos / 1_000_000 + " declarationMs=" + declarationNanos / 1_000_000
+                    + " snapshotMs=" + snapshotNanos / 1_000_000 + " analysisMs=" + analysisNanos / 1_000_000
+                    + " totalMs=" + (System.nanoTime() - batchStarted) / 1_000_000 + METRICS.format();
+        }
+        logFine(message);
+    }
+
+    private static void logFine(String message) {
+        try {
+            LOG.fine(message);
+        } catch (Throwable loggingFailure) {
+            // 日志设施的异常不能改变生命周期、分析结果或类定义。
+        }
     }
 
     private static IllegalStateException failureException() {
@@ -713,5 +894,12 @@ public final class TypedOverwriteRuntime {
 
     private static void checkFailure() {
         if (failure != null) throw failureException();
+    }
+
+    private static byte[] checkedReturn(byte[] bytes) {
+        synchronized (MONITOR) {
+            checkFailure();
+            return bytes;
+        }
     }
 }

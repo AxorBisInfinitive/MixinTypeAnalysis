@@ -75,20 +75,23 @@ final class KnotClassSources {
         }
         Map<String, ClassSourceIndex.Source> classes = new LinkedHashMap<>();
         for (String name : names) {
-            String resource = name + ".class";
-            URL url = (URL) findResource.invoke(loader, resource);
-            if (url == null) {
-                classes.put(name, new ClassSourceIndex.Source(name, null, null, loader, ClassSourceIndex.Status.MISSING));
-                continue;
-            }
-            Path root = UrlUtil.getCodeSource(url, resource).toAbsolutePath().normalize();
-            if (!state.roots().contains(root) || root.equals(infrastructure)) continue;
-            List<String> prefixes = state.prefixes().get(root);
-            boolean restricted = prefixes != null && prefixes.stream().noneMatch(name.replace('/', '.')::startsWith);
-            classes.put(name, new ClassSourceIndex.Source(name, url, root, loader,
-                    restricted ? ClassSourceIndex.Status.RESTRICTED : ClassSourceIndex.Status.DISCOVERED));
+            ClassSourceIndex.Source source = resolve(name, state);
+            if (source != null) classes.put(name, source);
         }
         return new ClassSourceIndex(classes);
+    }
+
+    ClassSourceIndex.Source resolve(String name, State state) throws ReflectiveOperationException,
+            net.fabricmc.loader.impl.util.UrlConversionException {
+        String resource = name + ".class";
+        URL url = (URL) findResource.invoke(loader, resource);
+        if (url == null) return new ClassSourceIndex.Source(name, null, null, loader, ClassSourceIndex.Status.MISSING);
+        Path root = UrlUtil.getCodeSource(url, resource).toAbsolutePath().normalize();
+        if (!state.roots().contains(root) || root.equals(infrastructure)) return null;
+        List<String> prefixes = state.prefixes().get(root);
+        boolean restricted = prefixes != null && prefixes.stream().noneMatch(name.replace('/', '.')::startsWith);
+        return new ClassSourceIndex.Source(name, url, root, loader,
+                restricted ? ClassSourceIndex.Status.RESTRICTED : ClassSourceIndex.Status.DISCOVERED);
     }
 
     static byte[] read(URL resource) throws IOException {

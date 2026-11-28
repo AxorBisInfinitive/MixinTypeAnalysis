@@ -12,7 +12,7 @@ public final class AnalysisMetrics {
         CONTAINER_FINAL_DISPATCH, CONTAINER_DEPENDENCIES,
         REPRESENTATION, REPRESENTATION_INPUT, REPRESENTATION_PROPAGATION, REPRESENTATION_INITIAL_FACTS,
         REPRESENTATION_VALIDATION, REPRESENTATION_FINAL_FACTS, REPRESENTATION_CONFLICTS, REPRESENTATION_DIAGNOSTICS,
-        PLAN, OUTPUT, PREMISES
+        PLAN, OUTPUT, PREMISES, BOOTSTRAP, PUBLISH
     }
     public enum Count {
         CANDIDATE_CLASSES, UNAVAILABLE_CLASSES, FAILED_INPUTS, SNAPSHOT_CLASSES, AVAILABLE_METHODS,
@@ -27,13 +27,15 @@ public final class AnalysisMetrics {
         FINAL_DISPATCH_BUILDS, FINAL_DISPATCH_HITS, DEPENDENCY_BUILDS, VALUE_RESOLUTIONS, VALUE_ORIGINS,
         REFERENCE_UNIONS, REFERENCE_UNION_REUSES, REFERENCE_UNION_GROWTHS, REFERENCE_MEMBERSHIP_CHECKS,
         REFERENCE_SEALED_ELEMENTS, ALIAS_CAPACITY_HINTS,
-        HIERARCHY_QUERIES, HIERARCHY_HITS, HIERARCHY_FAILURES, HIERARCHY_NODES
+        HIERARCHY_QUERIES, HIERARCHY_HITS, HIERARCHY_FAILURES, HIERARCHY_NODES,
+        SOURCE_CHECKS, PROTECTION_CHECKS, INSPECTED_CLASSES, SNAPSHOT_PARSES
     }
     private final Map<Stage, Long> nanos = new EnumMap<>(Stage.class);
     private final Map<Count, Long> counts = new EnumMap<>(Count.class);
 
     public synchronized void add(Stage stage, long elapsed) { nanos.merge(stage, elapsed, Long::sum); }
     public synchronized void count(Count count, long value) { counts.merge(count, value, Long::sum); }
+    public synchronized void set(Count count, long value) { counts.put(count, value); }
     public synchronized long count(Count count) { return counts.getOrDefault(count, 0L); }
     public synchronized Map<Stage, Long> nanos() { return Map.copyOf(nanos); }
 

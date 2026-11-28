@@ -11,6 +11,11 @@ public final class InitializationProbeAdapter implements LanguageAdapter {
             net.fabricmc.loader.impl.launch.FabricLauncherBase.getLauncher()
                     .addToClassPath(java.nio.file.Path.of(System.getProperty("probe.extraRoot")));
         }
+        if (System.getProperty("probe.sourceMutation") != null) {
+            var launcher = net.fabricmc.loader.impl.launch.FabricLauncherBase.getLauncher();
+            launcher.addToClassPath(java.nio.file.Path.of(System.getProperty("probe.firstRoot")));
+            launcher.addToClassPath(java.nio.file.Path.of(System.getProperty("probe.secondRoot")));
+        }
         String early = System.getProperty("probe.earlyClass");
         if (early != null) {
             Class.forName(early, true, getClass().getClassLoader());

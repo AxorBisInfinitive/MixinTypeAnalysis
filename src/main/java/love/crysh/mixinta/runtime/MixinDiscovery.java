@@ -33,6 +33,26 @@ final class MixinDiscovery {
     private record ConfigurationState(int priority, MixinEnvironment environment, String mixinPackage,
             Map<String, List<MixinBinding>> targets) { }
 
+    record ConfigurationSnapshot(Object processor, List<?> active, List<?> pending, Map<?, ?> bindings) {
+        ConfigurationSnapshot {
+            active = List.copyOf(active);
+            pending = List.copyOf(pending);
+            bindings = Map.copyOf(bindings);
+        }
+
+        boolean sameProcessor(ConfigurationSnapshot other) {
+            return processor == other.processor && sameIdentities(active, other.active) && sameIdentities(pending, other.pending);
+        }
+
+        private static boolean sameIdentities(List<?> first, List<?> second) {
+            if (first.size() != second.size()) return false;
+            for (int index = 0; index < first.size(); index++) {
+                if (first.get(index) != second.get(index)) return false;
+            }
+            return true;
+        }
+    }
+
     record Bindings(Map<String, byte[]> mixins, Map<String, List<String>> targets) {
         Bindings {
             mixins = ClassFiles.snapshot(mixins);
@@ -104,10 +124,14 @@ final class MixinDiscovery {
                 && Boolean.FALSE.equals(registration.nativeMethods().get(method.name + method.desc));
     }
 
-    Bindings bind() throws ReflectiveOperationException {
+    Bindings bind(ConfigurationSnapshot configurationSnapshot) throws ReflectiveOperationException {
+        Set<Object> active = java.util.Collections.newSetFromMap(new IdentityHashMap<>());
+        active.addAll(configurationSnapshot.active());
+        configurations.keySet().removeIf(configuration -> !active.contains(configuration));
         Map<String, byte[]> mixins = new LinkedHashMap<>();
         Map<String, List<String>> targets = new LinkedHashMap<>();
         for (Candidate candidate : candidates) {
+            if (!active.contains(candidate.configuration())) continue;
             List<String> effective = effectiveTargets(candidate.identity(), candidate.configuration());
             if (effective.isEmpty()) continue;
             Method loadable = candidate.identity().getClass().getDeclaredMethod("isLoadable");
@@ -183,9 +207,15 @@ final class MixinDiscovery {
         return loadableClasses.contains(name);
     }
 
-    Map<IMixinConfig, ?> configurationBindings() throws ReflectiveOperationException {
+    ConfigurationSnapshot configurationSnapshot(Object transformer) throws ReflectiveOperationException {
+        var processorField = transformer.getClass().getDeclaredField("processor");
+        processorField.setAccessible(true);
+        Object processor = processorField.get(transformer);
+        List<?> active = processorConfigurations(processor, "configs");
+        List<?> pending = processorConfigurations(processor, "pendingConfigs");
         Map<IMixinConfig, ConfigurationState> configurations = new IdentityHashMap<>();
-        for (IMixinConfig configuration : this.configurations.keySet()) {
+        for (Object activeConfiguration : active) {
+            IMixinConfig configuration = (IMixinConfig) activeConfiguration;
             Method getMixins = configuration.getClass().getDeclaredMethod("getMixinsFor", String.class);
             getMixins.setAccessible(true);
             Map<String, List<MixinBinding>> mappings = new LinkedHashMap<>();
@@ -199,7 +229,19 @@ final class MixinDiscovery {
             configurations.put(configuration, new ConfigurationState(configuration.getPriority(), configuration.getEnvironment(),
                     configuration.getMixinPackage(), Map.copyOf(mappings)));
         }
-        return Map.copyOf(configurations);
+        var snapshot = new ConfigurationSnapshot(processor, active, pending, configurations);
+        var after = new ConfigurationSnapshot(processorField.get(transformer), processorConfigurations(processor, "configs"),
+                processorConfigurations(processor, "pendingConfigs"), configurations);
+        if (!snapshot.sameProcessor(after)) {
+            throw new IllegalStateException("MIXIN_CONFIGURATION_CHANGED processor configurations changed during inspection");
+        }
+        return snapshot;
+    }
+
+    private static List<?> processorConfigurations(Object processor, String name) throws ReflectiveOperationException {
+        var field = processor.getClass().getDeclaredField(name);
+        field.setAccessible(true);
+        return List.copyOf((List<?>) field.get(processor));
     }
 
     static boolean hasDeclarations(ClassNode node) {

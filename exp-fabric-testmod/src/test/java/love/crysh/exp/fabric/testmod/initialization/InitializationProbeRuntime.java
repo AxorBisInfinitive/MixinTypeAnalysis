@@ -68,16 +68,29 @@ public final class InitializationProbeRuntime {
                     VERIFIED_DEFINITION_INPUTS.add(message.substring("MixinTA verified definition input ".length()));
                 }
                 if (message.equals("MixinTA bootstrap connected")) System.out.println("AGENT_CONNECTED");
-                if (message.equals("MixinTA phase=PREPARING") && Boolean.getBoolean("probe.missingPreparedInput")) {
+                if (message.equals("MixinTA target input ready fixture/business/Subject") && Boolean.getBoolean("probe.missingPreparedInput")) {
                     try {
                         java.nio.file.Files.delete(Path.of(System.getProperty("probe.extraRoot"), "fixture/business/Subject.class"));
                     } catch (java.io.IOException failure) { throw new AssertionError(failure); }
                 }
                 if (message.equals("MixinTA declarations prepared")) System.out.println("DECLARATIONS_PREPARED");
+                if (message.equals("MixinTA phase=PREPARING") && System.getProperty("probe.sourceMutation", "").equals("preparing")) {
+                    switchSource();
+                }
                 if (message.equals("MixinTA batch ready")) System.out.println("BATCH_READY");
-                if (message.startsWith("MixinTA metrics ")) System.out.println(message);
-                if (message.equals("MixinTA failure retained") && Boolean.getBoolean("probe.verifyFailure")) {
-                    verifyPersistentFailure(false);
+                if (message.startsWith("MixinTA metrics ")) {
+                    System.out.println(message);
+                    if (Boolean.getBoolean("probe.failMetricsLogger")) {
+                        System.out.println("METRICS_LOGGER_FAILURE");
+                        throw new IllegalStateException("Metrics log handler failure");
+                    }
+                }
+                if (message.equals("MixinTA failure retained")) {
+                    if (Boolean.getBoolean("probe.verifyFailure")) verifyPersistentFailure(false);
+                    if (Boolean.getBoolean("probe.failFailureLogger")) {
+                        System.out.println("FAILURE_LOGGER_FAILURE");
+                        throw new IllegalStateException("Failure log handler failure");
+                    }
                 }
                 if (message.equals("MixinTA waiting for batch")) {
                     System.out.println("WAIT_FOR_BATCH=" + Thread.currentThread().getName());
@@ -87,6 +100,12 @@ public final class InitializationProbeRuntime {
                     ANALYSES.incrementAndGet();
                     System.out.println("ANALYSIS_BEGIN");
                     if (Boolean.getBoolean("probe.concurrent")) startConcurrentLoads();
+                    if (System.getProperty("probe.sourceMutation", "").equals("analysis")) switchSource();
+                }
+                String rejected = System.getProperty("probe.failRuntimeLogger", "");
+                if (!rejected.isEmpty() && message.startsWith(rejected)) {
+                    System.out.println("RUNTIME_LOGGER_FAILURE=" + message);
+                    throw new IllegalStateException("Runtime log handler failure");
                 }
             }
             @Override public void flush() { }
@@ -281,6 +300,160 @@ public final class InitializationProbeRuntime {
             if (failure.getCause() instanceof Error error) throw error;
             if (failure.getCause() instanceof Exception cause) throw cause;
             throw new AssertionError(failure.getCause());
+        }
+    }
+
+    public static void switchSource() {
+        try {
+            Path original = Path.of(System.getProperty("probe.firstRoot"), "fixture/business/Caller.class");
+            java.nio.file.Files.delete(original);
+            System.out.println("SOURCE_WINNER_SWITCHED");
+        } catch (java.io.IOException failure) {
+            throw new AssertionError(failure);
+        }
+    }
+
+    @SuppressWarnings("unchecked")
+    public static void mutateConfigurations(String mutation) throws Exception {
+        Object transformer = org.spongepowered.asm.mixin.MixinEnvironment.getCurrentEnvironment().getActiveTransformer();
+        Object processor = field(transformer, "processor");
+        var configurations = (List<Object>) field(processor, "configs");
+        if (configurations.size() < 2) throw new AssertionError("Expected two active configurations");
+        switch (mutation) {
+            case "active-remove" -> configurations.clear();
+            case "active-replace" -> configurations.set(0, configurations.get(1));
+            case "active-reorder" -> java.util.Collections.reverse(configurations);
+            case "pending" -> ((List<Object>) field(processor, "pendingConfigs")).add(configurations.getFirst());
+            default -> throw new IllegalArgumentException(mutation);
+        }
+        System.out.println("PROCESSOR_CONFIGURATIONS_CHANGED=" + mutation);
+    }
+
+    public static void verifyInFlightDefinitionRejected(boolean published) throws Exception {
+        String name = "fixture.business.Subject";
+        var resource = LOADER.getResource(name.replace('.', '/') + ".class");
+        if (resource == null) throw new AssertionError("Missing target resource");
+        byte[] bytes;
+        try (var input = resource.openStream()) {
+            bytes = published ? snapshotMap("afterMixins").get(name.replace('.', '/')) : input.readAllBytes();
+        }
+        var entered = new CountDownLatch(1);
+        var released = new CountDownLatch(1);
+        String location = net.fabricmc.loader.impl.util.UrlUtil.getCodeSource(resource, name.replace('.', '/') + ".class")
+                .toUri().toString();
+        var delayed = new java.net.URL(null, location, new java.net.URLStreamHandler() {
+            @Override protected java.net.URLConnection openConnection(java.net.URL url) { throw new UnsupportedOperationException(); }
+            @Override protected String toExternalForm(java.net.URL url) {
+                boolean validating = StackWalker.getInstance().walk(frames -> frames.anyMatch(frame ->
+                        frame.getClassName().equals("love.crysh.mixinta.runtime.BatchPremises")
+                                && frame.getMethodName().equals("verifyDefinition")));
+                if (validating) {
+                    if ((Integer) runtimeField("activeChecks") == 0) throw new AssertionError("Definition check is not active");
+                    entered.countDown();
+                    try {
+                        if (!released.await(10, TimeUnit.SECONDS)) throw new AssertionError("Definition check was not released");
+                    } catch (InterruptedException failure) {
+                        Thread.currentThread().interrupt();
+                        throw new AssertionError(failure);
+                    }
+                }
+                return location;
+            }
+        });
+        // 独立的证书集合避免 SecureClassLoader 复用已有 ProtectionDomain，保留可暂停的来源 URL。
+        var certificate = new java.security.cert.Certificate("probe") {
+            @Override public byte[] getEncoded() { return new byte[] {1}; }
+            @Override public void verify(java.security.PublicKey key) { }
+            @Override public void verify(java.security.PublicKey key, String provider) { }
+            @Override public java.security.PublicKey getPublicKey() { return null; }
+            @Override public String toString() { return "probe"; }
+        };
+        var source = new java.security.CodeSource(delayed, new java.security.cert.Certificate[] {certificate});
+        var rejection = new java.util.concurrent.atomic.AtomicReference<Throwable>();
+        var metricsRecorded = new java.util.concurrent.atomic.AtomicBoolean();
+        Handler observer = new Handler() {
+            @Override public void publish(LogRecord record) {
+                if (record.getMessage().startsWith("MixinTA metrics ") && record.getMessage().contains(" status=FAILED ")) {
+                    metricsRecorded.set(true);
+                }
+            }
+            @Override public void flush() { }
+            @Override public void close() { }
+        };
+        Logger logger = Logger.getLogger("love.crysh.mixinta.runtime");
+        logger.addHandler(observer);
+        Thread definition = new Thread(() -> {
+            try { defineClass(name, bytes, source); }
+            catch (Throwable failure) { rejection.set(failure); }
+        }, "probe-in-flight-definition");
+        definition.start();
+        try {
+            if (!entered.await(10, TimeUnit.SECONDS)) throw new AssertionError("Definition check did not start", rejection.get());
+            org.spongepowered.asm.mixin.Mixins.addConfiguration("late.mixins.json");
+            try {
+                TypedOverwriteRuntime.initialize();
+                throw new AssertionError("Configuration change was accepted");
+            } catch (IllegalStateException expected) {
+                if (!expected.getCause().getMessage().contains("MIXIN_CONFIGURATION_CHANGED")) throw expected;
+            }
+            if (metricsRecorded.get()) throw new AssertionError("Failure metrics preceded definition check completion");
+            released.countDown();
+            definition.join(10000);
+            if (definition.isAlive()) throw new AssertionError("Definition check is stuck");
+            if (!(rejection.get() instanceof ClassFormatError)) throw new AssertionError("In-flight definition was accepted", rejection.get());
+            if (!metricsRecorded.get()) throw new AssertionError("Failure metrics were not recorded");
+            verifyPersistentFailure(published);
+            System.out.println("IN_FLIGHT_DEFINITION_REJECTED");
+            System.out.println("DEFINITION_METRICS_SETTLED");
+        } finally {
+            released.countDown();
+            definition.join(10000);
+            logger.removeHandler(observer);
+        }
+    }
+
+    public static void defineIndexedCaller(boolean wrongCodeSource) throws Exception {
+        var source = new java.security.CodeSource(Path.of(System.getProperty(wrongCodeSource ? "probe.secondRoot" : "probe.firstRoot"))
+                .toUri().toURL(), (java.security.cert.Certificate[]) null);
+        defineIndexedCaller(source);
+    }
+
+    public static void verifyUnverifiableDefinition(String location) throws Exception {
+        var source = new java.security.CodeSource(location.equals("null") ? null : java.net.URI.create(location).toURL(),
+                (java.security.cert.Certificate[]) null);
+        try {
+            defineIndexedCaller(source);
+            throw new AssertionError("Unverifiable definition was accepted");
+        } catch (ClassFormatError expected) {
+            System.out.println("UNVERIFIABLE_DEFINITION_REJECTED");
+        }
+        verifyPersistentFailure(true);
+        Throwable cause = (Throwable) field(runtimeField("failure"), "cause");
+        if (!cause.getMessage().contains("CLASS_SOURCE_CHANGED")) throw new AssertionError(cause);
+        System.out.println("DEFINITION_SOURCE_CAUSE=" + cause.getCause().getClass().getSimpleName());
+    }
+
+    private static void defineIndexedCaller(java.security.CodeSource source) throws Exception {
+        byte[] bytes = snapshotMap("afterMixins").get("fixture/business/Caller");
+        defineClass("fixture.business.Caller", bytes, source);
+    }
+
+    public static void defineRawCaller() throws Exception {
+        try (var input = LOADER.getResourceAsStream("fixture/business/Caller.class")) {
+            if (input == null) throw new AssertionError("Missing caller resource");
+            defineClass("fixture.business.Caller", input.readAllBytes(), null);
+        }
+    }
+
+    private static void defineClass(String name, byte[] bytes, java.security.CodeSource source) throws Exception {
+        var define = LOADER.getClass().getDeclaredMethod("defineClassFwd", String.class, byte[].class,
+                int.class, int.class, java.security.CodeSource.class);
+        define.setAccessible(true);
+        try {
+            define.invoke(LOADER, name, bytes, 0, bytes.length, source);
+        } catch (java.lang.reflect.InvocationTargetException failure) {
+            if (failure.getCause() instanceof Error error) throw error;
+            throw failure;
         }
     }
 
