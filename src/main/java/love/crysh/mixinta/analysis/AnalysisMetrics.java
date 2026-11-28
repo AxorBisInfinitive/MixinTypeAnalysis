@@ -5,7 +5,7 @@ import java.util.Map;
 
 /** 同一分析批次共享计数，阶段计时只累计其实际执行区间。 */
 public final class AnalysisMetrics {
-    public enum Stage { SOURCE, RAW_INPUT, PREPROCESS, MIXIN, INDEX, DATAFLOW, CONTAINER, REPRESENTATION, PLAN, OUTPUT, PREMISES }
+    public enum Stage { SOURCE, RAW_INPUT, PREPROCESS, MIXIN, DATAFLOW, CONTAINER, REPRESENTATION, PLAN, OUTPUT, PREMISES }
     public enum Count { CANDIDATE_CLASSES, UNAVAILABLE_CLASSES, FAILED_INPUTS, SNAPSHOT_CLASSES, AVAILABLE_METHODS, ANALYZED_METHODS, FLOW_CACHE_HITS, SUMMARY_CONTEXTS, MODIFIED_CLASSES }
     private final Map<Stage, Long> nanos = new EnumMap<>(Stage.class);
     private final Map<Count, Long> counts = new EnumMap<>(Count.class);

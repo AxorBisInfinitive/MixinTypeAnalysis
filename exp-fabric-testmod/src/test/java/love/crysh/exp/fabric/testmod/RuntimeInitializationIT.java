@@ -966,8 +966,6 @@ class RuntimeInitializationIT {
         List<String> command = new ArrayList<>(List.of(Path.of(System.getProperty("java.home"), "bin", executable).toString(),
                 "-Djava.awt.headless=true", "-Dstdout.encoding=UTF-8", "-Dstderr.encoding=UTF-8"));
         command.addAll(options);
-        String analysis = System.getProperty("mixinta.analysis");
-        if (analysis != null) command.add("-Dmixinta.analysis=" + analysis);
         if (preparationRoot != null) command.add("-Dprobe.extraRoot=" + preparationRoot);
         if (options.contains("-Dprobe.mutateSources=true")) {
             command.add("-Dprobe.extraRoot=" + Files.createDirectories(root.resolve("extra-source")));

@@ -946,8 +946,6 @@ class TypedOverwriteIT {
         command.add("-Dstdout.encoding=UTF-8");
         command.add("-Dstderr.encoding=UTF-8");
         command.addAll(vmOptions);
-        String analysis = System.getProperty("mixinta.analysis");
-        if (analysis != null) command.add("-Dmixinta.analysis=" + analysis);
         command.add("-Dexp.fabric.jar=" + appJar);
         command.add("-Dexp.fabric.runDir=" + run);
         command.add("-cp");

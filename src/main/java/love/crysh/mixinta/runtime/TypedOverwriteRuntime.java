@@ -421,9 +421,7 @@ public final class TypedOverwriteRuntime {
         long snapshotNanos = System.nanoTime() - started;
         started = System.nanoTime();
         transition(Phase.ANALYZING);
-        PreparedOverwrites.Mode mode = PreparedOverwrites.Mode.valueOf(System.getProperty("mixinta.analysis", "demand")
-                .toUpperCase(java.util.Locale.ROOT));
-        var plan = prepared.analyze(snapshots, METRICS, mode);
+        var plan = prepared.analyze(snapshots, METRICS);
         long outputStarted = System.nanoTime();
         Map<String, byte[]> transformed = plan.applyChanges();
         METRICS.add(AnalysisMetrics.Stage.OUTPUT, System.nanoTime() - outputStarted);
@@ -450,7 +448,7 @@ public final class TypedOverwriteRuntime {
         LOG.fine("MixinTA metrics classes=" + snapshots.size() + " modified=" + snapshot.modifiedClasses().size()
                 + " discoveryMs=" + discoveryNanos / 1_000_000 + " declarationMs=" + declarationNanos / 1_000_000
                 + " snapshotMs=" + snapshotNanos / 1_000_000 + " analysisMs=" + (System.nanoTime() - started) / 1_000_000
-                + " totalMs=" + (System.nanoTime() - batchStarted) / 1_000_000 + " mode=" + mode + METRICS.format());
+                + " totalMs=" + (System.nanoTime() - batchStarted) / 1_000_000 + METRICS.format());
         LOG.fine("MixinTA batch ready");
     }
 

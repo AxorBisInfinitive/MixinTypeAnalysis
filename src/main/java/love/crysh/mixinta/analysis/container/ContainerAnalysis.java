@@ -47,14 +47,14 @@ public final class ContainerAnalysis {
     public static Map<Set<ContainerContract>, ContainerAnalysis> analyzeAll(Map<String, ClassNode> classes,
             Set<MethodKey> targets, ClassHierarchy hierarchy,
             java.util.Collection<? extends java.util.Collection<ContainerContract>> contractGroups) {
-        return analyzeAll(classes, targets, hierarchy, contractGroups, new AnalysisMetrics(), null);
+        return analyzeAll(classes, targets, hierarchy, contractGroups, new AnalysisMetrics());
     }
 
     public static Map<Set<ContainerContract>, ContainerAnalysis> analyzeAll(Map<String, ClassNode> classes,
             Set<MethodKey> targets, ClassHierarchy hierarchy,
             java.util.Collection<? extends java.util.Collection<ContainerContract>> contractGroups,
-            AnalysisMetrics metrics, Set<MethodKey> scope) {
-        Builder builder = new Builder(classes, targets, hierarchy, metrics, scope);
+            AnalysisMetrics metrics) {
+        Builder builder = new Builder(classes, targets, hierarchy, metrics);
         Map<Set<ContainerContract>, ContainerAnalysis> completed = new LinkedHashMap<>();
         contractGroups.stream().map(Set::copyOf).distinct()
                 .sorted(java.util.Comparator.comparing(Builder::groupKey))
@@ -68,14 +68,12 @@ public final class ContainerAnalysis {
         private final ClassHierarchy hierarchy;
         private final Map<MethodKey, MethodFlow> sources = new LinkedHashMap<>();
         private final AnalysisMetrics metrics;
-        private final Set<MethodKey> scope;
 
-        Builder(Map<String, ClassNode> classes, Set<MethodKey> targets, ClassHierarchy hierarchy, AnalysisMetrics metrics, Set<MethodKey> scope) {
+        Builder(Map<String, ClassNode> classes, Set<MethodKey> targets, ClassHierarchy hierarchy, AnalysisMetrics metrics) {
             this.classes = classes;
             this.targets = Set.copyOf(targets);
             this.hierarchy = hierarchy;
             this.metrics = metrics;
-            this.scope = scope;
         }
 
         private static String groupKey(Set<ContainerContract> contracts) {
@@ -93,7 +91,6 @@ public final class ContainerAnalysis {
                 for (MethodNode method : owner.methods) {
                     MethodKey key = new MethodKey(owner.name, method.name, method.desc);
                     if (targets.contains(key) || containers.models(key)) continue;
-                    if (scope != null && !scope.contains(key)) continue;
                     if ((method.access & (Opcodes.ACC_ABSTRACT | Opcodes.ACC_NATIVE)) != 0) {
                         summaries.put(key, ContainerMethodAnalyzer.unavailable(key, method.access));
                         continue;

@@ -58,17 +58,17 @@ public final class RepresentationBatch {
 
     public static RepresentationBatchResult analyze(List<RepresentationMigration> declarations, Map<String, ClassNode> classes,
             Map<MethodKey, Migration> targets, ClassHierarchy hierarchy) {
-        return analyze(declarations, classes, targets, hierarchy, new AnalysisMetrics(), null);
+        return analyze(declarations, classes, targets, hierarchy, new AnalysisMetrics());
     }
 
     public static RepresentationBatchResult analyze(List<RepresentationMigration> declarations, Map<String, ClassNode> classes,
-            Map<MethodKey, Migration> targets, ClassHierarchy hierarchy, AnalysisMetrics metrics, java.util.Set<MethodKey> scope) {
+            Map<MethodKey, Migration> targets, ClassHierarchy hierarchy, AnalysisMetrics metrics) {
         List<BatchConflict> conflicts = new ArrayList<>();
         List<Session> sessions = declarations.stream().sorted(Comparator.comparing((RepresentationMigration value) -> value.target().toString())
                 .thenComparingInt(RepresentationMigration::parameter).thenComparing(RepresentationMigration::id))
                 .map(value -> new Session(List.of(value))).toList();
         var containers = ContainerAnalysis.analyzeAll(classes, targets.keySet(), hierarchy,
-                sessions.stream().map(session -> session.declarations.getFirst().containers()).toList(), metrics, scope);
+                sessions.stream().map(session -> session.declarations.getFirst().containers()).toList(), metrics);
         long representationStarted = System.nanoTime();
         Map<java.util.Set<ContainerContract>, RepresentationInput> inputs = new LinkedHashMap<>();
         containers.forEach((contracts, analysis) -> inputs.put(contracts, new RepresentationInput(analysis)));

@@ -1,7 +1,6 @@
 package love.crysh.mixinta.analysis;
 
 import love.crysh.mixinta.analysis.container.ContainerContract;
-import love.crysh.mixinta.analysis.container.MethodAnalysisScope;
 import love.crysh.mixinta.analysis.declaration.ContainerRuleReader;
 import love.crysh.mixinta.analysis.declaration.Migration;
 import love.crysh.mixinta.analysis.declaration.MixinAnnotations;
@@ -37,9 +36,6 @@ import java.util.Set;
  * analyze 接收同一批类在 Mixin 处理后的完整快照，其中应同时存在原方法和 typed 实现。
  */
 public final class PreparedOverwrites {
-    public enum Mode { FULL, DEMAND, VERIFY }
-    private record Outcome(TransformationPlan plan, TypedOverwriteException failure) { }
-    private record Output(Map<String, byte[]> classes, TypedOverwriteException failure) { }
     private final Map<String, byte[]> originals;
     private final Map<String, byte[]> mixins;
     private final List<Migration> migrations;
@@ -66,53 +62,10 @@ public final class PreparedOverwrites {
     }
 
     public TransformationPlan analyze(Map<String, byte[]> afterMixins) {
-        Mode mode = Mode.valueOf(System.getProperty("mixinta.analysis", "full").toUpperCase(java.util.Locale.ROOT));
-        return analyze(afterMixins, new AnalysisMetrics(), mode);
+        return analyze(afterMixins, new AnalysisMetrics());
     }
 
-    /** VERIFY 在同一份 Mixin 后输入上核对按需分析与完整分析的结果及诊断。 */
-    public TransformationPlan analyze(Map<String, byte[]> afterMixins, AnalysisMetrics metrics, Mode mode) {
-        if (mode != Mode.VERIFY) return analyze(afterMixins, metrics, mode == Mode.DEMAND);
-        Outcome demand = outcome(afterMixins, metrics, true);
-        Outcome full = outcome(afterMixins, new AnalysisMetrics(), false);
-        boolean equal;
-        if (demand.failure() != null || full.failure() != null) {
-            equal = demand.failure() != null && full.failure() != null
-                    && demand.failure().diagnostics().equals(full.failure().diagnostics());
-        } else {
-            Output first = output(demand.plan());
-            Output second = output(full.plan());
-            equal = demand.plan().modifiedClasses().equals(full.plan().modifiedClasses())
-                    && demand.plan().retiredMethods().equals(full.plan().retiredMethods())
-                    && equalOutputs(first, second);
-        }
-        if (!equal) throw new TypedOverwriteException(List.of(new Diagnostic("ANALYSIS_SCOPE_MISMATCH", null, -1, -1,
-                "Demand and full analysis disagree demand=" + demand.failure() + " full=" + full.failure())));
-        if (demand.failure() != null) throw demand.failure();
-        return demand.plan();
-    }
-
-    private static Output output(TransformationPlan plan) {
-        try { return new Output(plan.applyChanges(), null); }
-        catch (TypedOverwriteException failure) { return new Output(Map.of(), failure); }
-    }
-
-    private static boolean equalOutputs(Output first, Output second) {
-        if (first.failure() != null || second.failure() != null) {
-            return first.failure() != null && second.failure() != null
-                    && first.failure().diagnostics().equals(second.failure().diagnostics());
-        }
-        return first.classes().keySet().equals(second.classes().keySet())
-                && first.classes().entrySet().stream()
-                        .allMatch(entry -> Arrays.equals(entry.getValue(), second.classes().get(entry.getKey())));
-    }
-
-    private Outcome outcome(Map<String, byte[]> afterMixins, AnalysisMetrics metrics, boolean demand) {
-        try { return new Outcome(analyze(afterMixins, metrics, demand), null); }
-        catch (TypedOverwriteException failure) { return new Outcome(null, failure); }
-    }
-
-    private TransformationPlan analyze(Map<String, byte[]> afterMixins, AnalysisMetrics metrics, boolean demand) {
+    public TransformationPlan analyze(Map<String, byte[]> afterMixins, AnalysisMetrics metrics) {
         Map<String, byte[]> snapshot = ClassFiles.snapshot(afterMixins);
         List<Diagnostic> diagnostics = new ArrayList<>();
         Map<String, ClassNode> nodes = AnalysisClassReader.readAll(snapshot, diagnostics);
@@ -180,10 +133,7 @@ public final class PreparedOverwrites {
         TypedOverwriteException.throwIfErrors(diagnostics);
         List<RepresentationPlan> representationPlans = new ArrayList<>();
         if (!representations.isEmpty()) {
-            long started = System.nanoTime();
-            Set<MethodKey> scope = demand ? MethodAnalysisScope.select(nodes, byTarget.keySet(), hierarchy) : null;
-            metrics.add(AnalysisMetrics.Stage.INDEX, System.nanoTime() - started);
-            var batch = RepresentationBatch.analyze(representations, nodes, byTarget, hierarchy, metrics, scope);
+            var batch = RepresentationBatch.analyze(representations, nodes, byTarget, hierarchy, metrics);
             diagnostics.addAll(batch.diagnostics());
             batch.plan().ifPresent(representationPlans::add);
         }
